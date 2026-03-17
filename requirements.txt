@@ -1,0 +1,9 @@
+Flask==3.0.0
+Flask-SocketIO==5.3.6
+aiohttp==3.9.1
+pytz==2023.3.post1
+eth-account>=0.13.0
+py-clob-client>=0.34.0
+python-dotenv==1.0.0
+eventlet==0.33.3
+pandas==2.1.3

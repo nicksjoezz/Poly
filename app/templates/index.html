@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WeatherArb | Polymarket Bot</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body>
+    <div class="weather-bg" id="weather-bg">
+        <div class="cloud" style="top: 10%; animation-duration: 30s;"></div>
+        <div class="cloud" style="top: 30%; animation-duration: 45s; animation-delay: -10s;"></div>
+        <div class="cloud" style="top: 60%; animation-duration: 35s; animation-delay: -20s;"></div>
+    </div>
+
+    <div class="container">
+        <header>
+            <div class="logo-section">
+                <h1>WeatherArb V2</h1>
+                <p>Advanced Weather Prediction & Arbitrage Engine</p>
+            </div>
+            <div class="control-section">
+                <div class="status-indicator">
+                    <span class="dot" id="status-dot"></span>
+                    <span id="status-text">Disconnected</span>
+                </div>
+                <button id="main-control-btn" class="btn btn-success" style="width: 120px;">Start Bot</button>
+            </div>
+        </header>
+
+        <nav class="tabs">
+            <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
+            <button class="tab-btn" data-tab="positions">Open Positions</button>
+            <button class="tab-btn" data-tab="scan">Market Scan</button>
+            <button class="tab-btn" data-tab="news">Weather News</button>
+            <button class="tab-btn" data-tab="settings">Settings</button>
+        </nav>
+
+        <main id="tab-content">
+            <!-- Dashboard Tab -->
+            <section id="dashboard" class="tab-pane active">
+                <div class="grid">
+                    <div class="card">
+                        <h3><i data-lucide="bar-chart-3"></i> Performance</h3>
+                        <div class="metrics-grid">
+                            <div class="metric-item">
+                                <span class="metric-value" id="m-trades">0</span>
+                                <span class="metric-label">Total Trades</span>
+                            </div>
+                            <div class="metric-item">
+                                <span class="metric-value" id="m-winrate">0%</span>
+                                <span class="metric-label">Win Rate</span>
+                            </div>
+                            <div class="metric-item">
+                                <span class="metric-value" id="m-profit">$0.00</span>
+                                <span class="metric-label">Total PnL</span>
+                            </div>
+                            <div class="metric-item">
+                                <span class="metric-value" id="m-balance">$0.00</span>
+                                <span class="metric-label">Balance</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <h3><i data-lucide="terminal"></i> Live Activity</h3>
+                        <div class="log-container" id="log-display">
+                            <div class="log-entry">Waiting for bot initialization...</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Positions Tab -->
+            <section id="positions" class="tab-pane" style="display: none;">
+                <div class="card">
+                    <h3><i data-lucide="briefcase"></i> Active Positions</h3>
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Market</th>
+                                <th>Size</th>
+                                <th>Entry</th>
+                                <th>Current</th>
+                                <th>PnL</th>
+                            </tr>
+                        </thead>
+                        <tbody id="positions-table">
+                            <!-- JS populated -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Market Scan Tab -->
+            <section id="scan" class="tab-pane" style="display: none;">
+                <div class="card">
+                    <h3><i data-lucide="radar"></i> Polymarket Weather Scan</h3>
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Market Question</th>
+                                <th>Volume</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="scan-table">
+                            <!-- JS populated -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- News Tab -->
+            <section id="news" class="tab-pane" style="display: none;">
+                <div class="card">
+                    <h3><i data-lucide="newspaper"></i> Relevant Weather Alerts</h3>
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Source</th>
+                                <th>Location</th>
+                                <th>Event Type</th>
+                                <th>Confidence</th>
+                                <th>Description</th>
+                            </tr>
+                        </thead>
+                        <tbody id="news-table">
+                            <!-- JS populated -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- Settings Tab -->
+            <section id="settings" class="tab-pane" style="display: none;">
+                <div class="grid">
+                    <div class="card">
+                        <h3><i data-lucide="settings"></i> Bot Configuration</h3>
+                        <form id="settings-form">
+                            <div class="form-group">
+                                <label>Trading Mode</label>
+                                <select id="s-mode">
+                                    <option value="true">Paper Trading (Simulation)</option>
+                                    <option value="false">Live Trading (Mainnet)</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>Position Size (USDC)</label>
+                                <input type="number" id="s-amount" step="0.1" value="10.0">
+                            </div>
+                            <div class="form-group">
+                                <label>Minimum Edge (%)</label>
+                                <input type="number" id="s-edge" step="0.01" value="0.20">
+                            </div>
+                            <div class="form-group">
+                                <label>Scan Interval (Minutes)</label>
+                                <input type="number" id="s-interval" value="2">
+                            </div>
+                            <div class="form-group">
+                                <label>Initial Paper Balance ($)</label>
+                                <input type="number" id="s-balance" value="1000">
+                            </div>
+                            <button type="submit" class="btn btn-primary">Save Settings</button>
+                        </form>
+                    </div>
+                    <div class="card">
+                        <h3><i data-lucide="key"></i> API Credentials</h3>
+                        <p style="font-size: 0.8rem; color: var(--text-dim); margin-bottom: 10px;">
+                            Keys are stored in memory only. For permanent storage, use .env file.
+                        </p>
+                        <div class="form-group">
+                            <label>Private Key</label>
+                            <input type="password" id="s-pk" placeholder="0x...">
+                        </div>
+                        <div class="form-group">
+                            <label>Wallet Address</label>
+                            <input type="text" id="s-wallet" placeholder="0x...">
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    <script>
+        lucide.createIcons();
+    </script>
+</body>
+</html>
