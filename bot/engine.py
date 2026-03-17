@@ -98,6 +98,29 @@ CITY_DB = {
     "accra":          ( 5.6037,   -0.1870,  "GH", False, "Africa/Accra"),
     "abuja":          ( 9.0579,    7.4951,  "NG", False, "Africa/Lagos"),
     "riyadh":         (24.7136,   46.6753,  "SA", False, "Asia/Riyadh"),
+    "wellington":     (-41.2865, 174.7762,  "NZ", False, "Pacific/Auckland"),
+    "ankara":         (39.9334,   32.8597,  "TR", False, "Europe/Istanbul"),
+    "tel aviv":       (32.0853,   34.7818,  "IL", False, "Asia/Jerusalem"),
+    "lucknow":        (26.8467,   80.9462,  "IN", False, "Asia/Kolkata"),
+    "munich":         (48.1351,   11.5820,  "DE", False, "Europe/Berlin"),
+    "milan":          (45.4642,    9.1899,  "IT", False, "Europe/Rome"),
+    "taipei":         (25.0330,  121.5654,  "TW", False, "Asia/Taipei"),
+}
+
+CITY_ALIASES = {
+    "nyc": "new york",
+    "la": "los angeles",
+    "sf": "san francisco",
+    "dc": "washington",
+}
+
+SYNONYMS = {
+    "rain": ["rain", "precipitation", "rainfall", "wet"],
+    "snow": ["snow", "blizzard", "winter storm", "snowfall"],
+    "temperature": ["temperature", "heat", "cold", "celsius", "fahrenheit", "degrees", "warm", "hot", "hottest"],
+    "hurricane": ["hurricane", "cyclone", "typhoon", "storm", "named storm"],
+    "tornado": ["tornado", "twister"],
+    "severe": ["severe", "storm", "wind", "natural disaster"],
 }
 
 ALERT_SEVERITY = {
@@ -281,7 +304,8 @@ class WeatherBot:
     async def fetch_reliefweb(self, session: aiohttp.ClientSession) -> list[WeatherEvent]:
         events = []
         try:
-            url = "https://api.reliefweb.int/v1/disasters?limit=50"
+            # Added appname and fields parameters to ensure data richness and API compliance
+            url = "https://api.reliefweb.int/v1/disasters?appname=weather-arb-bot&limit=50&preset=latest"
             async with session.get(url) as resp:
                 if resp.status != 200:
                     return []
@@ -339,11 +363,19 @@ class WeatherBot:
 
     async def fetch_all_weather_markets(self, session: aiohttp.ClientSession) -> list[dict]:
         all_markets = {}
-        # Extended keywords and specific weather terms
-        keywords = ["weather", "rain", "temperature", "hurricane", "snow", "flood", "precipitation", "celsius", "fahrenheit"]
+        # Extended keywords based on actual Polymarket weather categories
+        keywords = [
+            "weather", "rain", "temperature", "hurricane", "snow", "flood",
+            "precipitation", "celsius", "fahrenheit", "hottest", "tornado",
+            "earthquake", "disaster", "volcano"
+        ]
 
-        # Blacklist to avoid common non-weather markets
-        blacklist = ["stanley cup", "nhl", "nba", "fifa", "world cup", "gta", "ceasefire", "convicted", "sentenced", "election", "war", "qualify"]
+        # Blacklist to avoid common non-weather markets often caught in broad searches
+        blacklist = [
+            "stanley cup", "nhl", "nba", "fifa", "world cup", "gta", "ceasefire",
+            "convicted", "sentenced", "election", "war", "qualify", "crypto",
+            "bitcoin", "ethereum", "fed", "interest rate", "stock", "company"
+        ]
 
         async def fetch_kw(kw):
             url = f"https://gamma-api.polymarket.com/markets"
@@ -567,11 +599,22 @@ class WeatherBot:
                 else:
                     combined_conf = event.confidence
 
-                # Refined matching: location + event_type must both be present
+                # Refined matching: location (or alias) + event_type (or synonym) must both be present
                 matched_markets = []
+                loc_variants = [event.location.lower()]
+                for alias, real_name in CITY_ALIASES.items():
+                    if real_name == event.location.lower():
+                        loc_variants.append(alias)
+
+                type_synonyms = SYNONYMS.get(event.event_type, [event.event_type])
+
                 for m in cached_markets:
                     text = (m.get("question","") + " " + m.get("description","")).lower()
-                    if event.location.lower() in text and event.event_type.lower() in text:
+
+                    has_loc = any(re.search(rf"\b{v}\b", text) for v in loc_variants)
+                    has_type = any(re.search(rf"\b{s}\b", text) for s in type_synonyms)
+
+                    if has_loc and has_type:
                         matched_markets.append(m)
 
                 if matched_markets:
