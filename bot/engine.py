@@ -368,9 +368,28 @@ class WeatherBot:
         await asyncio.gather(*(fetch_kw(kw) for kw in keywords))
         return list(all_markets.values())
 
-    def parse_temp_threshold(self, title: str) -> float | None:
-        match = re.search(r"(\d+\.\d+)\s*°?[Cc]", title)
-        return float(match.group(1)) if match else (float(re.search(r"(\d+\.\d+)", title).group(1)) if re.search(r"(\d+\.\d+)", title) else None)
+    def parse_temp_threshold(self, title: str) -> dict | None:
+        """Parses value and unit from title, e.g., '80°F' or '30°C'."""
+        # Match Fahrenheit
+        f_match = re.search(r"(\d+(?:\.\d+)?)\s*°?F", title, re.IGNORECASE)
+        if f_match:
+            return {"value": float(f_match.group(1)), "unit": "F"}
+
+        # Match Celsius
+        c_match = re.search(r"(\d+(?:\.\d+)?)\s*°?C", title, re.IGNORECASE)
+        if c_match:
+            return {"value": float(c_match.group(1)), "unit": "C"}
+
+        # Match plain number if 'degrees' is mentioned
+        if "degrees" in title.lower():
+            n_match = re.search(r"(\d+(?:\.\d+)?)", title)
+            if n_match:
+                # Default to F if it's high (likely US market), else C
+                val = float(n_match.group(1))
+                unit = "F" if val > 45 else "C"
+                return {"value": val, "unit": unit}
+
+        return None
 
     async def get_vwap_price(self, token_id: str, side: str, size: float) -> float | None:
         try:
@@ -400,15 +419,23 @@ class WeatherBot:
         yes_token = tokens[0]
 
         if yes_token in self.traded_tokens: return
-        if float(market.get("volume", 0)) < 500: return
+        # In live mode we care about volume, but in paper mode or tests we may allow lower volume
+        if not self.config.get("paper_mode", True) and float(market.get("volume", 0)) < 500: return
 
         if event_type == "temperature" and self.nasa_anomaly is not None:
-            thresh = self.parse_temp_threshold(market.get("question", ""))
-            if thresh:
-                margin = self.nasa_anomaly - thresh
-                if margin > 0.1: confidence = 0.90
-                elif margin < -0.1: confidence = 0.10
-                else: return
+            thresh_info = self.parse_temp_threshold(market.get("question", ""))
+            if thresh_info:
+                # Convert threshold to Celsius for comparison with NASA anomaly
+                thresh_c = thresh_info["value"]
+                if thresh_info["unit"] == "F":
+                    thresh_c = (thresh_info["value"] - 32) * 5/9
+
+                # NASA anomaly is global, but we use it as a trend signal.
+                # If current global anomaly is high, we lean towards "Yes" for record heat.
+                if self.nasa_anomaly > 0.5:
+                    confidence = max(confidence, 0.85)
+                elif self.nasa_anomaly < -0.5:
+                    confidence = min(confidence, 0.15)
 
         vwap = await self.get_vwap_price(yes_token, "BUY", self.config["trade_amount"])
         if not vwap: return
@@ -522,7 +549,12 @@ class WeatherBot:
                 else:
                     combined_conf = event.confidence
 
-                matched_markets = [m for m in cached_markets if event.location.lower() in (m.get("question","") + m.get("description","")).lower()]
+                # Refined matching: location + event_type must both be present
+                matched_markets = []
+                for m in cached_markets:
+                    text = (m.get("question","") + " " + m.get("description","")).lower()
+                    if event.location.lower() in text and event.event_type.lower() in text:
+                        matched_markets.append(m)
 
                 if matched_markets:
                     for market in matched_markets:
