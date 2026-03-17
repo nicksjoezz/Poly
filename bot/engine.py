@@ -339,28 +339,46 @@ class WeatherBot:
 
     async def fetch_all_weather_markets(self, session: aiohttp.ClientSession) -> list[dict]:
         all_markets = {}
-        keywords = ["weather", "rain", "temperature", "hurricane", "snow", "flood"]
+        # Extended keywords and specific weather terms
+        keywords = ["weather", "rain", "temperature", "hurricane", "snow", "flood", "precipitation", "celsius", "fahrenheit"]
+
+        # Blacklist to avoid common non-weather markets
+        blacklist = ["stanley cup", "nhl", "nba", "fifa", "world cup", "gta", "ceasefire", "convicted", "sentenced", "election", "war", "qualify"]
 
         async def fetch_kw(kw):
             url = f"https://gamma-api.polymarket.com/markets"
             params = {
                 "active": "true",
                 "closed": "false",
-                "limit": 50,
+                "limit": 100,
                 "q": kw
             }
             try:
                 async with session.get(url, params=params) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        # Filter to ensure the keyword actually appears in question or description
-                        # to avoid generic 'GTA VI' markets that might match search loosely
                         count = 0
                         for m in data:
-                            text = (m.get("question", "") + " " + m.get("description", "")).lower()
-                            if kw in text:
-                                all_markets[m["id"]] = m
-                                count += 1
+                            title = m.get("question", "").lower()
+                            desc = m.get("description", "").lower()
+                            full_text = title + " " + desc
+
+                            # 1. Check if ANY blacklisted term is in the title
+                            if any(b in title for b in blacklist):
+                                continue
+
+                            # 2. Specific check for sports teams
+                            if "carolina hurricanes" in title or "miami heat" in title:
+                                continue
+
+                            # 3. Ensure the keyword exists as a whole word
+                            if re.search(rf"\b{kw}\b", full_text):
+                                # 4. Secondary check: must contain at least one city from our DB
+                                # or be a very specific weather term
+                                has_city = any(city in full_text for city in CITY_DB)
+                                if has_city or kw in ["rain", "snow", "hurricane", "flood", "precipitation", "celsius", "fahrenheit"]:
+                                    all_markets[m["id"]] = m
+                                    count += 1
                         log.info(f"Polymarket search for '{kw}' returned {len(data)} results, {count} matched strictly.")
             except Exception as e:
                 log.error(f"Error searching Polymarket for '{kw}': {e}")
