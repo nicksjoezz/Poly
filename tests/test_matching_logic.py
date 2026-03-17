@@ -1,6 +1,8 @@
 import asyncio
+import pytest
 from bot.engine import WeatherBot, WeatherEvent
 
+@pytest.mark.asyncio
 async def test_matching():
     config = {
         "trade_amount": 10.0,
