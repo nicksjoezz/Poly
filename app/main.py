@@ -45,23 +45,30 @@ def create_app():
         global bot_instance
         action = request.json.get("action")
 
-        if action == "start":
-            if not bot_instance:
-                bot_instance = WeatherBot(bot_config)
-            bot_instance.start()
-        elif action == "stop":
-            if bot_instance:
-                bot_instance.stop()
+        if not bot_instance:
+            bot_instance = WeatherBot(bot_config)
+            bot_instance.initialize()
 
-        return jsonify({"status": "success", "is_running": bot_instance.is_running if bot_instance else False})
+        if action == "start":
+            bot_instance.start_trading()
+        elif action == "stop":
+            bot_instance.stop_trading()
+
+        return jsonify({"status": "success", "is_trading": bot_instance.is_trading})
 
     @socketio.on('request_update')
     def handle_update():
+        global bot_instance
+        if not bot_instance:
+            bot_instance = WeatherBot(bot_config)
+            bot_instance.initialize()
+
         if bot_instance:
             socketio.emit('bot_status', bot_instance.get_status())
         else:
             socketio.emit('bot_status', {
                 "is_running": False,
+                "is_trading": False,
                 "metrics": {"total_trades": 0, "win_rate": 0, "total_profit": 0, "balance": bot_config["paper_balance"]},
                 "open_positions": [],
                 "scanned_markets": [],

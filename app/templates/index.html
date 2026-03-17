@@ -11,9 +11,12 @@
 </head>
 <body>
     <div class="weather-bg" id="weather-bg">
-        <div class="cloud" style="top: 10%; animation-duration: 30s;"></div>
-        <div class="cloud" style="top: 30%; animation-duration: 45s; animation-delay: -10s;"></div>
-        <div class="cloud" style="top: 60%; animation-duration: 35s; animation-delay: -20s;"></div>
+        <div class="sun-ray"></div>
+        <div class="cloud cloud-lg" style="top: 5%; animation-duration: 60s;"></div>
+        <div class="cloud cloud-md" style="top: 25%; animation-duration: 45s; animation-delay: -15s;"></div>
+        <div class="cloud cloud-sm" style="top: 50%; animation-duration: 30s; animation-delay: -5s;"></div>
+        <div class="cloud cloud-lg" style="top: 70%; animation-duration: 80s; animation-delay: -40s;"></div>
+        <div class="rain-container" id="rain-container"></div>
     </div>
 
     <div class="container">
@@ -185,6 +188,18 @@
         </main>
     </div>
 
+    <script>
+        // Create Rain Drops
+        const rainContainer = document.getElementById('rain-container');
+        for (let i = 0; i < 50; i++) {
+            const drop = document.createElement('div');
+            drop.className = 'drop';
+            drop.style.left = Math.random() * 100 + '%';
+            drop.style.animationDelay = Math.random() * 2 + 's';
+            drop.style.opacity = Math.random();
+            rainContainer.appendChild(drop);
+        }
+    </script>
     <script src="{{ url_for('static', filename='js/app.js') }}"></script>
     <script>
         lucide.createIcons();

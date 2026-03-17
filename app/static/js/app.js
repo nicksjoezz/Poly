@@ -43,22 +43,22 @@ document.addEventListener('DOMContentLoaded', () => {
         })
         .then(res => res.json())
         .then(data => {
-            updateBotUI(data.is_running);
+            updateBotUI(data.is_trading);
         });
     });
 
-    function updateBotUI(running) {
-        botRunning = running;
-        if (running) {
+    function updateBotUI(isTrading) {
+        botRunning = isTrading;
+        if (isTrading) {
             statusDot.classList.add('active');
-            statusText.innerText = 'Bot Running';
-            mainControlBtn.innerText = 'Stop Bot';
+            statusText.innerText = 'Trading Active';
+            mainControlBtn.innerText = 'Stop Trading';
             mainControlBtn.classList.remove('btn-success');
             mainControlBtn.classList.add('btn-danger');
         } else {
             statusDot.classList.remove('active');
-            statusText.innerText = 'Bot Stopped';
-            mainControlBtn.innerText = 'Start Bot';
+            statusText.innerText = 'Scanning Only';
+            mainControlBtn.innerText = 'Start Trading';
             mainControlBtn.classList.remove('btn-danger');
             mainControlBtn.classList.add('btn-success');
         }
@@ -66,7 +66,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Socket Updates
     socket.on('bot_status', (data) => {
-        updateBotUI(data.is_running);
+        updateBotUI(data.is_trading);
 
         // Update Metrics
         mTrades.innerText = data.metrics.total_trades;

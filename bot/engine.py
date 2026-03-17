@@ -166,6 +166,7 @@ class WeatherBot:
     def __init__(self, config):
         self.config = config
         self.is_running = False
+        self.is_trading = False
         self.traded_tokens = set()
         self.active_snipes = set()
         self.nasa_anomaly = None
@@ -368,6 +369,7 @@ class WeatherBot:
         except Exception: return None
 
     async def execute_trade(self, market: dict, confidence: float, event_type: str):
+        if not self.is_trading: return
         tokens = market.get("clobTokenIds", [])
         if not tokens: return
         yes_token = tokens[0]
@@ -409,11 +411,12 @@ class WeatherBot:
                 self.open_positions.append({"question": market["question"], "amount": self.config["trade_amount"], "price": vwap, "token_id": yes_token})
 
     async def sniper_task(self, event: WeatherEvent, combined_conf: float, snipe_key: str):
+        if not self.is_trading: return
         self.add_log(f"🎯 [SNIPER LAUNCHED] Watching Polymarket for new '{event.location}' market...")
         try:
             async with aiohttp.ClientSession() as session:
                 for attempt in range(1, 11):
-                    if not self.is_running: break
+                    if not self.is_running or not self.is_trading: break
                     url = f"https://gamma-api.polymarket.com/markets?q={event.location}&active=true&closed=false"
                     async with session.get(url) as resp:
                         if resp.status == 200:
@@ -505,23 +508,14 @@ class WeatherBot:
                 if not self.is_running: break
                 await asyncio.sleep(1)
 
-    def start(self):
+    def initialize(self):
+        """Starts the background scanning loop."""
         if self.is_running: return
         self.is_running = True
-        self.add_log("Bot starting...")
+        self.add_log("Background Scanner initialized.")
 
-        # Initialize CLOB Client
-        if not self.config["paper_mode"]:
-            try:
-                self.clob_client = ClobClient("https://clob.polymarket.com", key=self.config["private_key"], chain_id=137, signature_type=0, funder=self.config["wallet_address"])
-                self.clob_client.set_api_creds(self.clob_client.create_or_derive_api_creds())
-            except Exception as e:
-                self.add_log(f"Failed to initialize CLOB client: {e}", "ERROR")
-                self.is_running = False
-                return
-        else:
-            # Simulated client if needed or just skip live calls
-            self.clob_client = ClobClient("https://clob.polymarket.com", key="0"*64, chain_id=137) # Dummy for price fetching
+        # Initialize CLOB Client for price fetching
+        self.clob_client = ClobClient("https://clob.polymarket.com", key="0"*64, chain_id=137)
 
         import threading
         def run_in_thread():
@@ -533,13 +527,26 @@ class WeatherBot:
         self._thread = threading.Thread(target=run_in_thread, daemon=True)
         self._thread.start()
 
-    def stop(self):
-        self.is_running = False
-        self.add_log("Bot stopped.")
+    def start_trading(self):
+        if not self.is_running: self.initialize()
+        self.is_trading = True
+        self.add_log("Trading activity started.")
+        if not self.config["paper_mode"]:
+            try:
+                self.clob_client = ClobClient("https://clob.polymarket.com", key=self.config["private_key"], chain_id=137, signature_type=0, funder=self.config["wallet_address"])
+                self.clob_client.set_api_creds(self.clob_client.create_or_derive_api_creds())
+            except Exception as e:
+                self.add_log(f"Failed to initialize live CLOB client: {e}", "ERROR")
+                self.is_trading = False
+
+    def stop_trading(self):
+        self.is_trading = False
+        self.add_log("Trading activity stopped.")
 
     def get_status(self):
         return {
             "is_running": self.is_running,
+            "is_trading": self.is_trading,
             "metrics": self.metrics,
             "open_positions": self.open_positions,
             "scanned_markets": self.scanned_markets[:20],
