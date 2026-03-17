@@ -281,11 +281,10 @@ class WeatherBot:
     async def fetch_reliefweb(self, session: aiohttp.ClientSession) -> list[WeatherEvent]:
         events = []
         try:
-            payload = {
-                "limit": 50, "fields": {"include": ["name", "type", "country", "status"]},
-                "filter": {"field": "status", "value": "current"}, "sort": ["date:desc"]
-            }
-            async with session.post("https://api.reliefweb.int/v1/disasters", json=payload) as resp:
+            url = "https://api.reliefweb.int/v1/disasters?limit=50"
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return []
                 data = await resp.json()
                 for item in data.get("data", []):
                     fields = item.get("fields", {})
@@ -340,13 +339,33 @@ class WeatherBot:
 
     async def fetch_all_weather_markets(self, session: aiohttp.ClientSession) -> list[dict]:
         all_markets = {}
-        tasks = [session.get(f"https://gamma-api.polymarket.com/markets?q={kw}&active=true&closed=false&limit=50")
-                 for kw in ["weather", "rain", "temperature", "hurricane", "snow", "flood"]]
+        keywords = ["weather", "rain", "temperature", "hurricane", "snow", "flood"]
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for res in results:
-            if not isinstance(res, Exception) and res.status == 200:
-                for m in await res.json(): all_markets[m["id"]] = m
+        async def fetch_kw(kw):
+            url = f"https://gamma-api.polymarket.com/markets"
+            params = {
+                "active": "true",
+                "closed": "false",
+                "limit": 50,
+                "q": kw
+            }
+            try:
+                async with session.get(url, params=params) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        # Filter to ensure the keyword actually appears in question or description
+                        # to avoid generic 'GTA VI' markets that might match search loosely
+                        count = 0
+                        for m in data:
+                            text = (m.get("question", "") + " " + m.get("description", "")).lower()
+                            if kw in text:
+                                all_markets[m["id"]] = m
+                                count += 1
+                        log.info(f"Polymarket search for '{kw}' returned {len(data)} results, {count} matched strictly.")
+            except Exception as e:
+                log.error(f"Error searching Polymarket for '{kw}': {e}")
+
+        await asyncio.gather(*(fetch_kw(kw) for kw in keywords))
         return list(all_markets.values())
 
     def parse_temp_threshold(self, title: str) -> float | None:
@@ -371,6 +390,12 @@ class WeatherBot:
     async def execute_trade(self, market: dict, confidence: float, event_type: str):
         if not self.is_trading: return
         tokens = market.get("clobTokenIds", [])
+        if isinstance(tokens, str):
+            import json
+            try:
+                tokens = json.loads(tokens)
+            except:
+                return
         if not tokens: return
         yes_token = tokens[0]
 
@@ -435,28 +460,40 @@ class WeatherBot:
 
     async def run_pipeline(self):
         self.add_log("=== Pipeline Scan Started ===")
-        timeout = aiohttp.ClientTimeout(total=20)
+        timeout = aiohttp.ClientTimeout(total=30)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             if self.nasa_anomaly is None: await self.update_nasa_anomaly(session)
 
-            results = await asyncio.gather(
+            self.add_log("Fetching alerts from NOAA, GDACS, MeteoAlarm, and ReliefWeb...")
+            alert_tasks = [
                 self.fetch_noaa_alerts(session),
                 self.fetch_gdacs(session),
                 self.fetch_meteoalarm(session),
-                self.fetch_reliefweb(session),
-                self.fetch_all_weather_markets(session),
-                return_exceptions=True
-            )
+                self.fetch_reliefweb(session)
+            ]
+            alert_results = await asyncio.gather(*alert_tasks, return_exceptions=True)
 
             all_events = []
-            for r in results[:-1]:
-                if isinstance(r, list): all_events.extend(r)
+            for i, r in enumerate(alert_results):
+                source = ["NOAA", "GDACS", "MeteoAlarm", "ReliefWeb"][i]
+                if isinstance(r, Exception):
+                    self.add_log(f"Error fetching from {source}: {r}", "ERROR")
+                elif isinstance(r, list):
+                    all_events.extend(r)
+                    self.add_log(f"Fetched {len(r)} alerts from {source}")
 
             self.news_events = [{"source": e.source, "location": e.location, "type": e.event_type, "conf": e.confidence, "desc": e.description} for e in all_events]
 
-            cached_markets = results[-1] if isinstance(results[-1], list) else []
-            self.scanned_markets = [{"question": m["question"], "volume": m.get("volume")} for m in cached_markets]
-            self.add_log(f"Extracted {len(all_events)} active global alerts. Scanned {len(cached_markets)} markets.")
+            self.add_log("Fetching markets from Polymarket Gamma API...")
+            try:
+                cached_markets = await self.fetch_all_weather_markets(session)
+                self.scanned_markets = [{"question": m["question"], "volume": float(m.get("volume", 0))} for m in cached_markets]
+                self.add_log(f"Fetched {len(cached_markets)} markets from Polymarket")
+            except Exception as e:
+                self.add_log(f"Error fetching Polymarket markets: {e}", "ERROR")
+                cached_markets = []
+
+            self.add_log(f"Summary: {len(all_events)} active global alerts. {len(cached_markets)} weather markets.")
 
             deduped = {}
             for ev in all_events:
@@ -513,16 +550,21 @@ class WeatherBot:
         if self.is_running: return
         self.is_running = True
         self.add_log("Background Scanner initialized.")
+        log.info("Background Scanner initialized.")
 
         # Initialize CLOB Client for price fetching
         self.clob_client = ClobClient("https://clob.polymarket.com", key="0"*64, chain_id=137)
 
         import threading
         def run_in_thread():
+            log.info("Bot thread started.")
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             self._loop_task = loop.create_task(self._loop())
-            loop.run_until_complete(self._loop_task)
+            try:
+                loop.run_until_complete(self._loop_task)
+            except Exception as e:
+                log.error(f"Bot thread loop failed: {e}")
 
         self._thread = threading.Thread(target=run_in_thread, daemon=True)
         self._thread.start()
