@@ -12,11 +12,11 @@ bot_instance = None
 bot_config = {
     "private_key": os.getenv("PRIVATE_KEY", ""),
     "trade_amount": 10.0,
-    "min_edge": 0.20,
+    "min_edge": 0.05,
     "scan_interval": 2,
     "paper_mode": True,
-    "paper_balance": 1000.0,
-    "max_trades": 10
+    "paper_balance": 10000.0,
+    "max_trades": 20
 }
 
 def create_app():

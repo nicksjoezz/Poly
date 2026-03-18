@@ -138,7 +138,9 @@ document.addEventListener('DOMContentLoaded', () => {
             scanCountBadge.innerText = `${data.total_scanned || 0} Markets Found`;
         }
         if (data.scanned_markets && data.scanned_markets.length > 0) {
-            scanTable.innerHTML = data.scanned_markets.map(m => {
+            // Limit to 100 markets for UI performance
+            const displayMarkets = data.scanned_markets.slice(0, 100);
+            scanTable.innerHTML = displayMarkets.map(m => {
                 const displayTitle = m.question.length > 85 ? m.question.substring(0, 82) + '...' : m.question;
                 const statusTag = m.is_new ? '<span class="side-badge yes" style="padding: 2px 6px; font-size: 0.7rem;">New</span>' : '<span style="color: var(--text-dim); font-size: 0.8rem;">Watching</span>';
                 return `

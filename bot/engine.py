@@ -118,6 +118,8 @@ CITY_ALIASES = {
     "la": "los angeles",
     "sf": "san francisco",
     "dc": "washington",
+    "nyc": "new york",
+    "new york city": "new york",
 }
 
 SYNONYMS = {
@@ -127,6 +129,7 @@ SYNONYMS = {
     "hurricane": ["hurricane", "cyclone", "typhoon", "storm", "named storm"],
     "tornado": ["tornado", "twister"],
     "severe": ["severe", "storm", "wind", "natural disaster"],
+    "earthquake": ["earthquake", "seismic", "quake", "megaquake"],
 }
 
 ALERT_SEVERITY = {
@@ -214,6 +217,7 @@ class WeatherBot:
         self.logs = []
         self.clob_client = None
         self._loop_task = None
+        self._scan_event = asyncio.Event()
 
     def add_log(self, message, level="INFO"):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -374,7 +378,7 @@ class WeatherBot:
         all_markets = {}
 
         # Tag Discovery Logic
-        tag_ids = [84, 103040, 496, 103037, 832, 104180]
+        tag_ids = [84, 103040, 496, 832, 104180]
 
         # Blacklist to avoid common non-weather markets often caught in broad searches
         blacklist = [
@@ -404,8 +408,8 @@ class WeatherBot:
                                 title = m.get("question", "").lower()
                                 volume = float(m.get("volume", 0))
 
-                                # Volume filter: Discard markets with less than $500 volume
-                                if volume < 500: continue
+                                # Volume filter: Discard markets with less than $100 volume
+                                if volume < 100: continue
 
                                 # Simple filter for tags as they are already weather-focused
                                 if not any(b in title for b in blacklist):
@@ -436,8 +440,8 @@ class WeatherBot:
                             full_text = title + " " + desc
                             volume = float(m.get("volume", 0))
 
-                            # Volume filter: Discard markets with less than $500 volume
-                            if volume < 500: continue
+                            # Volume filter: Discard markets with less than $100 volume
+                            if volume < 100: continue
 
                             if any(b in title for b in blacklist): continue
                             if any(b in desc for b in ["ceasefire", "ukraine", "russia", "qualify", "world cup"]): continue
@@ -459,26 +463,29 @@ class WeatherBot:
 
     def parse_temp_threshold(self, title: str) -> dict | None:
         """Parses value and unit from title, e.g., '80°F' or '30°C'."""
-        # Handle ranges like "between 60 and 70"
-        range_match = re.search(r"between (\d+(?:\.\d+)?)\s*(?:and|to)\s*(\d+(?:\.\d+)?)", title, re.IGNORECASE)
+        # Handle ranges like "between 60 and 70" or "80-81"
+        range_match = re.search(r"between (\d+(?:\.\d+)?)\s*(?:and|to|&)\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)", title, re.IGNORECASE)
         if range_match:
-            v1, v2 = float(range_match.group(1)), float(range_match.group(2))
-            unit = "C" # Default for Polymarket usually, but let's check title
+            if range_match.group(1):
+                v1, v2 = float(range_match.group(1)), float(range_match.group(2))
+            else:
+                v1, v2 = float(range_match.group(3)), float(range_match.group(4))
+            unit = "C" # Default for Polymarket usually
             if "°f" in title.lower() or "fahrenheit" in title.lower(): unit = "F"
             return {"type": "range", "min": v1, "max": v2, "unit": unit}
 
-        # Handle "100 or more" or "at least 100"
-        at_least_match = re.search(r"(\d+(?:\.\d+)?)\s*or more|at least\s*(\d+(?:\.\d+)?)", title, re.IGNORECASE)
+        # Handle "100 or more", "at least 100", "100 or higher"
+        at_least_match = re.search(r"(\d+(?:\.\d+)?)\s*or more|at least\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*or higher", title, re.IGNORECASE)
         if at_least_match:
-            val = float(at_least_match.group(1) or at_least_match.group(2))
+            val = float(at_least_match.group(1) or at_least_match.group(2) or at_least_match.group(3))
             unit = "C"
             if "°f" in title.lower() or "fahrenheit" in title.lower(): unit = "F"
             return {"type": "at_least", "value": val, "unit": unit}
 
-        # Handle "less than 60"
-        less_than_match = re.search(r"less than\s*(\d+(?:\.\d+)?)", title, re.IGNORECASE)
+        # Handle "less than 60", "60 or below"
+        less_than_match = re.search(r"less than\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*or below", title, re.IGNORECASE)
         if less_than_match:
-            val = float(less_than_match.group(1))
+            val = float(less_than_match.group(1) or less_than_match.group(2))
             unit = "C"
             if "°f" in title.lower() or "fahrenheit" in title.lower(): unit = "F"
             return {"type": "less_than", "value": val, "unit": unit}
@@ -530,7 +537,7 @@ class WeatherBot:
             return f"2026-{m}"
 
         # Try year only: in 2026
-        year_match = re.search(r"\b(202\d)\b", text)
+        year_match = re.search(r"\b(202[4-9])\b", text)
         if year_match:
             return year_match.group(1)
 
@@ -539,12 +546,13 @@ class WeatherBot:
     def parse_market_location(self, text: str) -> str | None:
         """Identifies location from market text."""
         text = text.lower()
-        for city in CITY_DB:
-            if re.search(rf"\b{city}\b", text):
-                return city
+        # Check aliases first for better precision (e.g. NYC)
         for alias, real in CITY_ALIASES.items():
             if re.search(rf"\b{alias}\b", text):
                 return real
+        for city in CITY_DB:
+            if re.search(rf"\b{city}\b", text):
+                return city
 
         # Default for global/scientific markets
         if any(kw in text for kw in ["worldwide", "global", "earthquakes", "on record", "sea ice"]):
@@ -577,11 +585,12 @@ class WeatherBot:
 
     async def execute_trade(self, market: dict, confidence: float, event_type: str):
         if not self.is_trading:
+            self.add_log(f"Opportunity found for {market.get('id')} but trading is DISABLED. Enable 'Start Trading' to execute.", "DEBUG")
             return
 
         # Check Max Trades Limit
         if len(self.open_positions) >= self.config.get("max_trades", 10):
-            log.debug("Max trades reached, skipping.")
+            self.add_log(f"Max trades reached ({len(self.open_positions)}), skipping market {market.get('id')}.", "DEBUG")
             return
 
         tokens = market.get("clobTokenIds", [])
@@ -589,22 +598,23 @@ class WeatherBot:
             try:
                 tokens = json.loads(tokens)
             except:
-                log.debug(f"Failed to parse tokens for market {market.get('id')}")
+                self.add_log(f"Failed to parse tokens for market {market.get('id')}", "DEBUG")
                 return
         if not tokens or len(tokens) < 2:
-            log.debug(f"Insufficient tokens for market {market.get('id')}")
+            self.add_log(f"Insufficient tokens for market {market.get('id')}", "DEBUG")
             return
 
         yes_token = tokens[0]
         no_token = tokens[1]
 
         if yes_token in self.traded_tokens or no_token in self.traded_tokens:
+            self.add_log(f"Market {market.get('id')} already traded, skipping.", "DEBUG")
             return
 
         # Volume filter
         volume = float(market.get("volume", 0))
-        if volume < 500:
-            log.debug(f"Low volume ({volume}) for market {market.get('id')}, skipping.")
+        if volume < 100:
+            self.add_log(f"Low volume ({volume}) for market {market.get('id')}, skipping.", "DEBUG")
             return
 
         if event_type == "temperature" and self.nasa_anomaly is not None:
@@ -628,8 +638,23 @@ class WeatherBot:
             self.get_vwap_price(no_token, "BUY", self.config["trade_amount"])
         )
 
+        # Fallback to AMM prices from Gamma API if CLOB is missing or illiquid
+        amm_prices = market.get("outcomePrices")
+        if isinstance(amm_prices, str):
+            try: amm_prices = json.loads(amm_prices)
+            except: amm_prices = None
+
+        if amm_prices and len(amm_prices) >= 2:
+            if vwap_yes is None: vwap_yes = float(amm_prices[0])
+            if vwap_no is None: vwap_no = float(amm_prices[1])
+
         taker_fee = 0.015
         target_side = None
+
+        if not vwap_yes and not vwap_no:
+            log.debug(f"No orderbook found for either YES or NO tokens in market {market.get('id')}")
+            return
+
         target_token = None
         best_vwap = 0
         best_edge = -1
@@ -643,8 +668,10 @@ class WeatherBot:
                 target_token = yes_token
                 best_vwap = vwap_yes
                 best_edge = edge_yes
+            else:
+                self.add_log(f"Low edge for YES in {market.get('id')}: {edge_yes:.2f} (Need {self.config['min_edge']:.2f})")
         else:
-            log.debug(f"No orderbook for YES token {yes_token}")
+            self.add_log(f"No orderbook/price for YES token {yes_token}", "DEBUG")
 
         # NO Edge
         if vwap_no:
@@ -656,8 +683,10 @@ class WeatherBot:
                 target_token = no_token
                 best_vwap = vwap_no
                 best_edge = edge_no
+            elif edge_no < self.config["min_edge"]:
+                self.add_log(f"Low edge for NO in {market.get('id')}: {edge_no:.2f} (Need {self.config['min_edge']:.2f})", "DEBUG")
         else:
-            log.debug(f"No orderbook for NO token {no_token}")
+            self.add_log(f"No orderbook/price for NO token {no_token}", "DEBUG")
 
         if target_side:
             self.add_log(f"Opportunity Found: {target_side} for '{market['question'][:50]}...'")
@@ -803,6 +832,7 @@ class WeatherBot:
 
             if discovered:
                 self.scanned_markets = [{"id": m["id"], "question": m["question"], "volume": float(m.get("volume", 0)), "is_new": m.get("is_new")} for m in discovered]
+            self.add_log(f"Scan complete: {len(discovered)} markets found.")
 
             cached_markets = discovered
             self.add_log(f"Discovered {len(cached_markets)} weather markets.")
@@ -814,7 +844,6 @@ class WeatherBot:
             for m in cached_markets:
                 title = m.get("question", "")
                 full_text = (title + " " + m.get("description", "")).lower()
-                market_vol = float(m.get("volume", 0))
 
                 location = self.parse_market_location(full_text)
                 date_str = self.parse_market_date(title)
@@ -826,7 +855,9 @@ class WeatherBot:
                         etype = t
                         break
 
-                if not location or not date_str: continue
+                if not location or not date_str:
+                    log.debug(f"Missing metadata for {m.get('id')} - Loc: {location}, Date: {date_str}")
+                    continue
                 city_data = CITY_DB.get(location)
                 confidence = 0.5 # Default neutral
 
@@ -890,7 +921,7 @@ class WeatherBot:
                             elif prob > 0.90: confidence = 0.95
 
                 # C. Hottest Year Rankings (Mutual Exclusion Logic)
-                if "hottest years on record" in title.lower() and self.nasa_anomaly is not None:
+                if "hottest year" in title.lower() and self.nasa_anomaly is not None:
                     if self.nasa_anomaly > 1.15: # Extreme anomaly, almost certainly #1
                         if any(kw in title.lower() for kw in ["hottest", "first", "1st"]): confidence = 0.98
                         else: confidence = 0.02 # All other ranks are NO
@@ -910,7 +941,7 @@ class WeatherBot:
                         confidence = 0.88
 
                 # E. Earthquake Logic (Mutual Exclusion)
-                if "earthquake" in title.lower() and "magnitude" in title.lower():
+                if any(kw in title.lower() for kw in ["earthquake", "megaquake"]):
                     exactly_match = re.search(r"exactly (\d+)", title, re.IGNORECASE)
                     more_than_match = re.search(r"more than (\d+)", title, re.IGNORECASE)
 
@@ -1013,9 +1044,12 @@ class WeatherBot:
                 except Exception as e:
                     self.add_log(f"Pipeline error: {e}", "ERROR")
 
-                for _ in range(self.config["scan_interval"] * 60):
-                    if not self.is_running: break
-                    await asyncio.sleep(1)
+                try:
+                    # Wait for interval or immediate trigger
+                    await asyncio.wait_for(self._scan_event.wait(), timeout=self.config["scan_interval"] * 60)
+                    self._scan_event.clear()
+                except (asyncio.TimeoutError, Exception):
+                    pass
 
     def initialize(self):
         """Starts the background scanning loop."""
@@ -1046,6 +1080,11 @@ class WeatherBot:
         if not self.is_running: self.initialize()
         self.is_trading = True
         self.add_log("Trading activity started.")
+        # Trigger immediate scan
+        if self._loop_task:
+            try:
+                self._loop_task.get_loop().call_soon_threadsafe(self._scan_event.set)
+            except: pass
 
         if not self.config["paper_mode"]:
             try:
