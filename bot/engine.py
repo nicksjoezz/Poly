@@ -74,6 +74,13 @@ CITY_DB = {
     "jakarta":        (-6.2088,  106.8456,  "ID", False, "Asia/Jakarta"),
     "kuala lumpur":   ( 3.1390,  101.6869,  "MY", False, "Asia/Kuala_Lumpur"),
     "manila":         (14.5995,  120.9842,  "PH", False, "Asia/Manila"),
+    "ankara":         (39.9334,   32.8597,  "TR", False, "Europe/Istanbul"),
+    "tel aviv":       (32.0853,   34.7818,  "IL", False, "Asia/Jerusalem"),
+    "lucknow":        (26.8467,   80.9462,  "IN", False, "Asia/Kolkata"),
+    "munich":         (48.1351,   11.5820,  "DE", False, "Europe/Berlin"),
+    "milan":          (45.4642,    9.1899,  "IT", False, "Europe/Rome"),
+    "taipei":         (25.0330,  121.5654,  "TW", False, "Asia/Taipei"),
+    "wellington":     (-41.2865, 174.7762,  "NZ", False, "Pacific/Auckland"),
 
     # ── Americas ex-US (Open-Meteo) ───────────────────────────
     "toronto":        (43.6532,  -79.3832,  "CA", False, "America/Toronto"),
@@ -98,13 +105,10 @@ CITY_DB = {
     "accra":          ( 5.6037,   -0.1870,  "GH", False, "Africa/Accra"),
     "abuja":          ( 9.0579,    7.4951,  "NG", False, "Africa/Lagos"),
     "riyadh":         (24.7136,   46.6753,  "SA", False, "Asia/Riyadh"),
-    "wellington":     (-41.2865, 174.7762,  "NZ", False, "Pacific/Auckland"),
-    "ankara":         (39.9334,   32.8597,  "TR", False, "Europe/Istanbul"),
-    "tel aviv":       (32.0853,   34.7818,  "IL", False, "Asia/Jerusalem"),
-    "lucknow":        (26.8467,   80.9462,  "IN", False, "Asia/Kolkata"),
-    "munich":         (48.1351,   11.5820,  "DE", False, "Europe/Berlin"),
-    "milan":          (45.4642,    9.1899,  "IT", False, "Europe/Rome"),
-    "taipei":         (25.0330,  121.5654,  "TW", False, "Asia/Taipei"),
+    "us":             (39.8283,  -98.5795,  "US", False, "UTC"),
+    "arctic":         (90.0000,    0.0000,  "AR", False, "UTC"),
+    "global":         (0.0000,     0.0000,  "GL", False, "UTC"),
+    "worldwide":      (0.0000,     0.0000,  "GL", False, "UTC"),
 }
 
 CITY_ALIASES = {
@@ -363,12 +367,9 @@ class WeatherBot:
 
     async def fetch_all_weather_markets(self, session: aiohttp.ClientSession) -> list[dict]:
         all_markets = {}
-        # Extended keywords based on actual Polymarket weather categories
-        keywords = [
-            "weather", "rain", "temperature", "hurricane", "snow", "flood",
-            "precipitation", "celsius", "fahrenheit", "hottest", "tornado",
-            "earthquake", "disaster", "volcano"
-        ]
+
+        # Tag Discovery Logic
+        tag_ids = [84, 103040, 496, 103037, 832, 104180]
 
         # Blacklist to avoid common non-weather markets often caught in broad searches
         blacklist = [
@@ -379,6 +380,33 @@ class WeatherBot:
             "palestine", "gaza", "china", "taiwan", "election", "president",
             "senate", "house", "gop", "democrat", "biden", "trump", "harris"
         ]
+
+        async def fetch_tag(tid):
+            # Using /events endpoint for tag filtering as it returns grouped markets
+            url = f"https://gamma-api.polymarket.com/events"
+            params = {
+                "active": "true",
+                "closed": "false",
+                "limit": 50,
+                "tag_id": tid
+            }
+            try:
+                async with session.get(url, params=params) as resp:
+                    if resp.status == 200:
+                        events = await resp.json()
+                        for event in events:
+                            for m in event.get("markets", []):
+                                title = m.get("question", "").lower()
+                                # Simple filter for tags as they are already weather-focused
+                                if not any(b in title for b in blacklist):
+                                    if m["id"] not in all_markets:
+                                        self.add_log(f"Market Discovery (Tag {tid}): {m.get('question')[:60]}...")
+                                    all_markets[m["id"]] = m
+            except Exception as e:
+                log.error(f"Error fetching Polymarket Tag {tid}: {e}")
+
+        # Fallback keywords
+        keywords = ["weather", "temperature", "hurricane", "tornado", "precipitation", "hottest", "celsius", "fahrenheit", "flood"]
 
         async def fetch_kw(kw):
             url = f"https://gamma-api.polymarket.com/markets"
@@ -392,46 +420,27 @@ class WeatherBot:
                 async with session.get(url, params=params) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        count = 0
                         for m in data:
                             title = m.get("question", "").lower()
                             desc = m.get("description", "").lower()
                             full_text = title + " " + desc
 
-                            # 1. Check if ANY blacklisted term is in the title
-                            blacklist_match = next((b for b in blacklist if b in title), None)
-                            if blacklist_match:
-                                if count < 3: log.debug(f"Filtered (Blacklist: {blacklist_match}): {title[:50]}...")
-                                continue
+                            if any(b in title for b in blacklist): continue
+                            if any(b in desc for b in ["ceasefire", "ukraine", "russia", "qualify", "world cup"]): continue
+                            if "carolina hurricanes" in title or "miami heat" in title: continue
 
-                            # Additional check: avoid ceasefire/war/qualify in description too
-                            if any(b in desc for b in ["ceasefire", "ukraine", "russia", "qualify", "world cup"]):
-                                continue
-
-                            # 2. Specific check for sports teams
-                            if "carolina hurricanes" in title or "miami heat" in title:
-                                if count < 3: log.debug(f"Filtered (Sports Team): {title[:50]}...")
-                                continue
-
-                            # 3. Ensure the keyword exists as a whole word
                             if re.search(rf"\b{kw}\b", full_text):
-                                # 4. Secondary check: must contain at least one city from our DB
-                                # or be a very specific weather term
                                 has_city = any(city in full_text for city in CITY_DB)
+                                # Broad keywords or city match
                                 if has_city or kw in ["rain", "snow", "hurricane", "flood", "precipitation", "celsius", "fahrenheit"]:
                                     if m["id"] not in all_markets:
-                                        self.add_log(f"Market Discovery: {m.get('question')[:60]}...")
+                                        self.add_log(f"Market Discovery (KW {kw}): {m.get('question')[:60]}...")
                                     all_markets[m["id"]] = m
-                                    count += 1
-                                else:
-                                    if count < 3: log.debug(f"Filtered (No City Match): {title[:50]}...")
-                            else:
-                                if count < 3: log.debug(f"Filtered (Keyword '{kw}' not a whole word): {title[:50]}...")
-                        log.info(f"Polymarket search for '{kw}' returned {len(data)} results, {count} matched strictly.")
             except Exception as e:
                 log.error(f"Error searching Polymarket for '{kw}': {e}")
 
-        await asyncio.gather(*(fetch_kw(kw) for kw in keywords))
+        tasks = [fetch_tag(tid) for tid in tag_ids] + [fetch_kw(kw) for kw in keywords]
+        await asyncio.gather(*tasks)
         return list(all_markets.values())
 
     def parse_temp_threshold(self, title: str) -> dict | None:
@@ -594,6 +603,29 @@ class WeatherBot:
                 cached_markets = []
 
             self.add_log(f"Summary: {len(all_events)} active global alerts. {len(cached_markets)} weather markets.")
+
+            # NEW: Analyze markets against alerts to find opportunities
+            for m in cached_markets:
+                title = m.get("question", "").lower()
+                desc = m.get("description", "").lower()
+                text = title + " " + desc
+
+                # Check each alert to see if it relates to this market
+                for ev in all_events:
+                    # Match location
+                    loc_variants = [ev.location.lower()]
+                    for alias, real_name in CITY_ALIASES.items():
+                        if real_name == ev.location.lower():
+                            loc_variants.append(alias)
+
+                    has_loc = any(re.search(rf"\b{v}\b", text) for v in loc_variants)
+
+                    # Match event type
+                    type_synonyms = SYNONYMS.get(ev.event_type, [ev.event_type])
+                    has_type = any(re.search(rf"\b{s}\b", text) for s in type_synonyms)
+
+                    if has_loc and has_type:
+                        self.add_log(f"🔔 Market Opportunity Identified: '{m.get('question')[:50]}...' supported by {ev.source} alert for {ev.location} ({ev.event_type}) with {ev.confidence:.0%} confidence.")
 
             deduped = {}
             for ev in all_events:
