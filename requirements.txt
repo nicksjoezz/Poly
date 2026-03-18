@@ -6,4 +6,3 @@ eth-account>=0.13.0
 py-clob-client>=0.34.0
 python-dotenv==1.0.0
 eventlet==0.33.3
-pandas==2.1.3

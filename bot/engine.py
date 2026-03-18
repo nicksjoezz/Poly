@@ -1,4 +1,5 @@
 import re
+import json
 import asyncio
 import aiohttp
 import pytz
@@ -201,6 +202,7 @@ class WeatherBot:
         self.scanned_markets = []
         self.news_events = []
         self.open_positions = []
+        self.resolved_positions = []
         self.metrics = {
             "total_trades": 0,
             "win_rate": 0.0,
@@ -399,6 +401,11 @@ class WeatherBot:
                         for event in events:
                             for m in event.get("markets", []):
                                 title = m.get("question", "").lower()
+                                volume = float(m.get("volume", 0))
+
+                                # Volume filter: Discard markets with less than $500 volume
+                                if volume < 500: continue
+
                                 # Simple filter for tags as they are already weather-focused
                                 if not any(b in title for b in blacklist):
                                     if m["id"] not in all_markets:
@@ -426,6 +433,10 @@ class WeatherBot:
                             title = m.get("question", "").lower()
                             desc = m.get("description", "").lower()
                             full_text = title + " " + desc
+                            volume = float(m.get("volume", 0))
+
+                            # Volume filter: Discard markets with less than $500 volume
+                            if volume < 500: continue
 
                             if any(b in title for b in blacklist): continue
                             if any(b in desc for b in ["ceasefire", "ukraine", "russia", "qualify", "world cup"]): continue
@@ -638,24 +649,27 @@ class WeatherBot:
                     self.add_log(f"✅ Trade confirmed: {resp}")
                     self.traded_tokens.add(target_token)
                     self.open_positions.append({
+                        "market_id": market.get("id"),
                         "question": market["question"],
                         "side": target_side,
                         "amount": self.config["trade_amount"],
                         "price": best_vwap,
-                        "token_id": target_token
+                        "token_id": target_token,
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     })
                 except Exception as e: self.add_log(f"❌ Trade failed: {e}", "ERROR")
             else:
                 self.add_log(f"✅ [PAPER MODE] {target_side} Trade Simulated.")
                 self.traded_tokens.add(target_token)
-                self.metrics["total_trades"] += 1
                 self.metrics["balance"] -= self.config["trade_amount"]
                 self.open_positions.append({
+                    "market_id": market.get("id"),
                     "question": market["question"],
                     "side": target_side,
                     "amount": self.config["trade_amount"],
                     "price": best_vwap,
-                    "token_id": target_token
+                    "token_id": target_token,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 })
 
     async def sniper_task(self, event: WeatherEvent, combined_conf: float, snipe_key: str):
@@ -673,6 +687,11 @@ class WeatherBot:
                             matched = []
                             for m in data:
                                 text = (m.get("question", "") + " " + m.get("description", "")).lower()
+                                volume = float(m.get("volume", 0))
+
+                                # Volume filter: Discard markets with less than $500 volume
+                                if volume < 500: continue
+
                                 if any(re.search(rf"\b{s}\b", text) for s in type_synonyms):
                                     matched.append(m)
 
@@ -887,16 +906,80 @@ class WeatherBot:
 
             self.add_log(f"Pipeline Scan Finished. Summary: {len(all_alerts)} alerts, {len(cached_markets)} markets analyzed.")
 
-    async def _loop(self):
-        while self.is_running:
-            try:
-                await self.run_pipeline()
-            except Exception as e:
-                self.add_log(f"Pipeline error: {e}", "ERROR")
+    async def resolve_trades(self, session: aiohttp.ClientSession):
+        """Checks if open positions have resolved and updates metrics."""
+        if not self.open_positions:
+            return
 
-            for _ in range(self.config["scan_interval"] * 60):
-                if not self.is_running: break
-                await asyncio.sleep(1)
+        self.add_log(f"Checking resolution for {len(self.open_positions)} positions...")
+        still_open = []
+
+        for pos in self.open_positions:
+            market_id = pos.get("market_id")
+            if not market_id:
+                still_open.append(pos)
+                continue
+
+            try:
+                url = f"https://gamma-api.polymarket.com/markets/{market_id}"
+                async with session.get(url) as resp:
+                    if resp.status == 200:
+                        m_data = await resp.json()
+                        if m_data.get("closed"):
+                            try:
+                                prices_raw = m_data.get("outcomePrices", "[0,0]")
+                                if isinstance(prices_raw, str):
+                                    prices = json.loads(prices_raw)
+                                else:
+                                    prices = prices_raw
+
+                                side_idx = 0 if pos["side"] == "YES" else 1
+                                final_price = float(prices[side_idx])
+
+                                # Tokens bought = amount / entry_price
+                                # Payout = tokens * final_price (usually 1.0 or 0.0)
+                                tokens = pos["amount"] / pos["price"]
+                                payout = tokens * final_price
+                                profit = payout - pos["amount"]
+
+                                self.metrics["total_trades"] += 1
+                                self.metrics["total_profit"] += profit
+                                self.metrics["balance"] += payout
+
+                                # Calculate win rate based on all resolved trades
+                                wins = len([p for p in self.resolved_positions if p.get("profit", 0) > 0])
+                                if profit > 0: wins += 1
+                                self.metrics["win_rate"] = (wins / self.metrics["total_trades"]) * 100
+
+                                pos["profit"] = profit
+                                pos["resolved_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                self.resolved_positions.append(pos)
+                                self.add_log(f"Trade Resolved: {pos['question'][:30]} | Profit: ${profit:+.2f}")
+                            except Exception as e:
+                                self.add_log(f"Error parsing resolution for {market_id}: {e}", "ERROR")
+                                still_open.append(pos)
+                        else:
+                            still_open.append(pos)
+                    else:
+                        still_open.append(pos)
+            except Exception as e:
+                self.add_log(f"Resolution check failed for {market_id}: {e}", "WARNING")
+                still_open.append(pos)
+
+        self.open_positions = still_open
+
+    async def _loop(self):
+        async with aiohttp.ClientSession() as session:
+            while self.is_running:
+                try:
+                    await self.run_pipeline()
+                    await self.resolve_trades(session)
+                except Exception as e:
+                    self.add_log(f"Pipeline error: {e}", "ERROR")
+
+                for _ in range(self.config["scan_interval"] * 60):
+                    if not self.is_running: break
+                    await asyncio.sleep(1)
 
     def initialize(self):
         """Starts the background scanning loop."""
@@ -944,6 +1027,7 @@ class WeatherBot:
             "is_trading": self.is_trading,
             "metrics": self.metrics,
             "open_positions": self.open_positions,
+            "resolved_positions": self.resolved_positions[-10:],
             "scanned_markets": self.scanned_markets[:50],
             "total_scanned": len(self.scanned_markets),
             "news_events": self.news_events[:20],

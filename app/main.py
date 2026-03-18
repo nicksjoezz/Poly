@@ -22,7 +22,7 @@ bot_config = {
 
 def create_app():
     app = Flask(__name__, template_folder="templates", static_folder="static")
-    app.config['SECRET_KEY'] = 'weather_secret_key'
+    app.config['SECRET_KEY'] = os.getenv("FLASK_SECRET_KEY", os.urandom(24).hex())
 
     socketio.init_app(app)
 

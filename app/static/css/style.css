@@ -203,6 +203,21 @@ header {
     color: var(--text-dim);
 }
 
+.loading-spinner {
+    width: 30px;
+    height: 30px;
+    border: 3px solid rgba(56, 189, 248, 0.2);
+    border-top: 3px solid var(--accent-blue);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    display: inline-block;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
 /* Tables & Lists */
 .data-table {
     width: 100%;
@@ -221,6 +236,14 @@ header {
     padding: 12px 10px;
     font-size: 0.9rem;
     border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    word-break: break-word;
+}
+
+.table-scroll {
+    max-height: 500px;
+    overflow-y: auto;
+    border-radius: 8px;
+    background: rgba(0,0,0,0.1);
 }
 
 .log-container {

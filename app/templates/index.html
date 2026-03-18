@@ -84,20 +84,42 @@
             <section id="positions" class="tab-pane" style="display: none;">
                 <div class="card">
                     <h3><i data-lucide="briefcase"></i> Active Positions</h3>
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>Market</th>
-                                <th>Side</th>
-                                <th>Size</th>
-                                <th>Entry</th>
-                                <th>Status</th>
-                            </tr>
-                        </thead>
-                        <tbody id="positions-table">
-                            <!-- JS populated -->
-                        </tbody>
-                    </table>
+                    <div class="table-scroll" style="max-height: 300px;">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Market</th>
+                                    <th>Side</th>
+                                    <th>Size</th>
+                                    <th>Entry</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="positions-table">
+                                <!-- JS populated -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="card" style="margin-top: 20px;">
+                    <h3><i data-lucide="check-circle"></i> Resolved Trades</h3>
+                    <div class="table-scroll" style="max-height: 300px;">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Market</th>
+                                    <th>Side</th>
+                                    <th>Size</th>
+                                    <th>Profit/Loss</th>
+                                    <th>Resolved At</th>
+                                </tr>
+                            </thead>
+                            <tbody id="resolved-table">
+                                <!-- JS populated -->
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </section>
 
@@ -108,18 +130,20 @@
                         <h3 style="margin-bottom: 0;"><i data-lucide="radar"></i> Polymarket Weather Scan</h3>
                         <span id="scan-count-badge" class="side-badge yes">0 Markets Found</span>
                     </div>
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>Market Question</th>
-                                <th>Volume</th>
-                                <th>Status</th>
-                            </tr>
-                        </thead>
-                        <tbody id="scan-table">
-                            <!-- JS populated -->
-                        </tbody>
-                    </table>
+                    <div class="table-scroll">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Market Question</th>
+                                    <th>Volume</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="scan-table">
+                                <!-- JS populated -->
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </section>
 
@@ -127,20 +151,22 @@
             <section id="news" class="tab-pane" style="display: none;">
                 <div class="card">
                     <h3><i data-lucide="newspaper"></i> Relevant Weather Alerts</h3>
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>Source</th>
-                                <th>Location</th>
-                                <th>Event Type</th>
-                                <th>Confidence</th>
-                                <th>Description</th>
-                            </tr>
-                        </thead>
-                        <tbody id="news-table">
-                            <!-- JS populated -->
-                        </tbody>
-                    </table>
+                    <div class="table-scroll">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Source</th>
+                                    <th>Location</th>
+                                    <th>Event Type</th>
+                                    <th>Confidence</th>
+                                    <th>Description</th>
+                                </tr>
+                            </thead>
+                            <tbody id="news-table">
+                                <!-- JS populated -->
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </section>
 

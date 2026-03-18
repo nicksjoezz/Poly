@@ -17,6 +17,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Tables
     const positionsTable = document.getElementById('positions-table');
+    const resolvedTable = document.getElementById('resolved-table');
     const scanTable = document.getElementById('scan-table');
     const newsTable = document.getElementById('news-table');
 
@@ -65,8 +66,14 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    let lastStatusJson = '';
+
     // Socket Updates
     socket.on('bot_status', (data) => {
+        const statusJson = JSON.stringify(data);
+        if (statusJson === lastStatusJson) return;
+        lastStatusJson = statusJson;
+
         updateBotUI(data.is_trading);
 
         // Update Metrics
@@ -101,7 +108,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Update Positions
         positionsTable.innerHTML = data.open_positions.map(p => `
             <tr>
-                <td>${p.question.substring(0, 50)}...</td>
+                <td title="${p.question}">${p.question.substring(0, 50)}...</td>
                 <td><span class="side-badge ${p.side.toLowerCase()}">${p.side}</span></td>
                 <td>$${p.amount}</td>
                 <td>${p.price.toFixed(3)}</td>
@@ -109,18 +116,41 @@ document.addEventListener('DOMContentLoaded', () => {
             </tr>
         `).join('');
 
+        // Update Resolved
+        if (resolvedTable && data.resolved_positions) {
+            resolvedTable.innerHTML = data.resolved_positions.map(p => {
+                const profitClass = p.profit >= 0 ? 'success' : 'danger';
+                return `
+                    <tr>
+                        <td title="${p.question}">${p.question.substring(0, 40)}...</td>
+                        <td><span class="side-badge ${p.side.toLowerCase()}">${p.side}</span></td>
+                        <td>$${p.amount}</td>
+                        <td class="${profitClass}">$${p.profit.toFixed(2)}</td>
+                        <td>${p.resolved_at}</td>
+                    </tr>
+                `;
+            }).reverse().join('');
+        }
+
         // Update Scan
         const scanCountBadge = document.getElementById('scan-count-badge');
         if (scanCountBadge) {
-            scanCountBadge.innerText = `${data.total_scanned || data.scanned_markets.length} Markets Found`;
+            scanCountBadge.innerText = `${data.total_scanned || 0} Markets Found`;
         }
-        scanTable.innerHTML = data.scanned_markets.map(m => `
-            <tr>
-                <td>${m.question}</td>
-                <td>$${Math.round(m.volume).toLocaleString()}</td>
-                <td><span style="color: var(--accent-blue)">Watching</span></td>
-            </tr>
-        `).join('');
+        if (data.scanned_markets && data.scanned_markets.length > 0) {
+            scanTable.innerHTML = data.scanned_markets.map(m => {
+                const displayTitle = m.question.length > 85 ? m.question.substring(0, 82) + '...' : m.question;
+                return `
+                    <tr>
+                        <td title="${m.question}">${displayTitle}</td>
+                        <td>$${Math.round(m.volume).toLocaleString()}</td>
+                        <td><span style="color: var(--accent-blue)">Watching</span></td>
+                    </tr>
+                `;
+            }).join('');
+        } else {
+            scanTable.innerHTML = '<tr><td colspan="3" style="text-align: center; padding: 40px; color: var(--text-dim);"><div class="loading-spinner"></div><br>Discovering high-volume weather markets...</td></tr>';
+        }
 
         // Update News
         newsTable.innerHTML = data.news_events.map(e => `
