@@ -12,7 +12,7 @@ from py_clob_client.clob_types import MarketOrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY
 
 # Logger setup
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
 # Constants and Mappings
@@ -374,7 +374,10 @@ class WeatherBot:
         blacklist = [
             "stanley cup", "nhl", "nba", "fifa", "world cup", "gta", "ceasefire",
             "convicted", "sentenced", "election", "war", "qualify", "crypto",
-            "bitcoin", "ethereum", "fed", "interest rate", "stock", "company"
+            "bitcoin", "ethereum", "fed", "interest rate", "stock", "company",
+            "ukraine", "russia", "middle east", "ceasefire", "peace", "israel",
+            "palestine", "gaza", "china", "taiwan", "election", "president",
+            "senate", "house", "gop", "democrat", "biden", "trump", "harris"
         ]
 
         async def fetch_kw(kw):
@@ -396,11 +399,18 @@ class WeatherBot:
                             full_text = title + " " + desc
 
                             # 1. Check if ANY blacklisted term is in the title
-                            if any(b in title for b in blacklist):
+                            blacklist_match = next((b for b in blacklist if b in title), None)
+                            if blacklist_match:
+                                if count < 3: log.debug(f"Filtered (Blacklist: {blacklist_match}): {title[:50]}...")
+                                continue
+
+                            # Additional check: avoid ceasefire/war/qualify in description too
+                            if any(b in desc for b in ["ceasefire", "ukraine", "russia", "qualify", "world cup"]):
                                 continue
 
                             # 2. Specific check for sports teams
                             if "carolina hurricanes" in title or "miami heat" in title:
+                                if count < 3: log.debug(f"Filtered (Sports Team): {title[:50]}...")
                                 continue
 
                             # 3. Ensure the keyword exists as a whole word
@@ -409,8 +419,14 @@ class WeatherBot:
                                 # or be a very specific weather term
                                 has_city = any(city in full_text for city in CITY_DB)
                                 if has_city or kw in ["rain", "snow", "hurricane", "flood", "precipitation", "celsius", "fahrenheit"]:
+                                    if m["id"] not in all_markets:
+                                        self.add_log(f"Market Discovery: {m.get('question')[:60]}...")
                                     all_markets[m["id"]] = m
                                     count += 1
+                                else:
+                                    if count < 3: log.debug(f"Filtered (No City Match): {title[:50]}...")
+                            else:
+                                if count < 3: log.debug(f"Filtered (Keyword '{kw}' not a whole word): {title[:50]}...")
                         log.info(f"Polymarket search for '{kw}' returned {len(data)} results, {count} matched strictly.")
             except Exception as e:
                 log.error(f"Error searching Polymarket for '{kw}': {e}")
@@ -523,10 +539,17 @@ class WeatherBot:
                     async with session.get(url) as resp:
                         if resp.status == 200:
                             data = await resp.json()
-                            matched = [m for m in data if event.event_type.lower() in (m.get("question", "") + m.get("description", "")).lower()]
+                            type_synonyms = SYNONYMS.get(event.event_type, [event.event_type])
+                            matched = []
+                            for m in data:
+                                text = (m.get("question", "") + " " + m.get("description", "")).lower()
+                                if any(re.search(rf"\b{s}\b", text) for s in type_synonyms):
+                                    matched.append(m)
+
                             if matched:
                                 self.add_log(f"🚨 [SNIPER HIT] Market deployed on attempt {attempt} for {event.location}!")
                                 for m in matched:
+                                    self.add_log(f"Sniper Matched: {m.get('question')}")
                                     await self.execute_trade(m, combined_conf, event.event_type)
                                 return
                     await asyncio.sleep(30)
@@ -615,6 +638,7 @@ class WeatherBot:
                     has_type = any(re.search(rf"\b{s}\b", text) for s in type_synonyms)
 
                     if has_loc and has_type:
+                        self.add_log(f"Matched Market: {m.get('question')} (Location: {event.location}, Type: {event.event_type})")
                         matched_markets.append(m)
 
                 if matched_markets:
