@@ -81,6 +81,7 @@ CITY_DB = {
     "milan":          (45.4642,    9.1899,  "IT", False, "Europe/Rome"),
     "taipei":         (25.0330,  121.5654,  "TW", False, "Asia/Taipei"),
     "wellington":     (-41.2865, 174.7762,  "NZ", False, "Pacific/Auckland"),
+    "hong kong":      (22.3193,  114.1694,  "HK", False, "Asia/Hong_Kong"),
 
     # ── Americas ex-US (Open-Meteo) ───────────────────────────
     "toronto":        (43.6532,  -79.3832,  "CA", False, "America/Toronto"),
@@ -711,6 +712,15 @@ class WeatherBot:
             return None
         except Exception: return None
 
+    async def fetch_earthquake_count(self, session: aiohttp.ClientSession, min_mag: float, start_date: str, end_date: str) -> int:
+        """Fetches count of earthquakes of a certain magnitude from USGS."""
+        try:
+            url = f"https://earthquake.usgs.gov/fdsnws/event/1/count?format=geojson&starttime={start_date}&endtime={end_date}&minmagnitude={min_mag}"
+            async with session.get(url) as resp:
+                data = await resp.json()
+                return data.get("count", 0)
+        except Exception: return 0
+
     async def run_pipeline(self):
         self.add_log("=== Pipeline Scan Started ===")
         timeout = aiohttp.ClientTimeout(total=30)
@@ -736,16 +746,19 @@ class WeatherBot:
 
             # 2. Discover ALL Weather Markets via Tags & Keywords
             self.add_log("Discovering Polymarket weather contracts...")
-            cached_markets = await self.fetch_all_weather_markets(session)
-            self.scanned_markets = [{"question": m["question"], "volume": float(m.get("volume", 0))} for m in cached_markets]
+            new_markets = await self.fetch_all_weather_markets(session)
+            if new_markets:
+                self.scanned_markets = [{"question": m["question"], "volume": float(m.get("volume", 0))} for m in new_markets]
+            cached_markets = new_markets
             self.add_log(f"Discovered {len(cached_markets)} weather markets.")
 
             # 3. Process Each Market: Analyze supporting news/data and compare
+            # Cache for forecasts within this scan to save API limits and speed up grouped processing
+            local_forecast_cache = {}
+
             for m in cached_markets:
                 title = m.get("question", "")
                 full_text = (title + " " + m.get("description", "")).lower()
-
-                # Proactive discovery: if volume is high, ensure we check for news
                 market_vol = float(m.get("volume", 0))
 
                 location = self.parse_market_location(full_text)
@@ -758,114 +771,115 @@ class WeatherBot:
                         etype = t
                         break
 
-                self.add_log(f"Analyzing Market: {title[:50]}... (Loc: {location}, Date: {date_str}, Type: {etype})", "DEBUG")
-
-                if not location or not date_str:
-                    continue
-
+                if not location or not date_str: continue
                 city_data = CITY_DB.get(location)
                 confidence = 0.5 # Default neutral
 
-                # A. Check for matching News Alerts (Location + Event Type + Keywords)
-                # If market is high volume, try a specific query to news sources if not already caught
-                if market_vol > 5000 and location:
-                    # Logic to fetch specifically for this market would go here if APIs supported it easily.
-                    # For now we rely on our broad ingestion which covers major events.
-                    pass
-
+                # A. News Reference Check
                 matching_alerts = []
                 for a in all_alerts:
-                    loc_match = a.location == location
-                    type_match = a.event_type == etype
-
-                    # Fuzzy match: does the market question share significant words with the alert description?
-                    market_words = set(re.findall(r"\w+", title.lower()))
-                    alert_words = set(re.findall(r"\w+", a.description.lower()))
-                    overlap = market_words.intersection(alert_words)
-                    # Filter out common stop words if necessary, but overlap count is a good heuristic
-
-                    if loc_match and (type_match or len(overlap) >= 3):
-                        matching_alerts.append(a)
+                    if a.location == location:
+                        market_words = set(re.findall(r"\w+", title.lower()))
+                        alert_words = set(re.findall(r"\w+", a.description.lower()))
+                        if a.event_type == etype or len(market_words.intersection(alert_words)) >= 3:
+                            matching_alerts.append(a)
 
                 if matching_alerts:
                     best_alert = max(matching_alerts, key=lambda a: a.confidence)
-                    # If we have a news match, we boost confidence
                     confidence = max(confidence, best_alert.confidence)
-                    self.add_log(f"  [NEWS] Reference found in {best_alert.source} for {location}. Overlap: {len(market_words.intersection(alert_words))} words. Confidence -> {confidence:.2f}")
+                    self.add_log(f"  [NEWS] Found matching {best_alert.source} alert for {location}. Confidence -> {confidence:.2f}")
 
-                # B. Data-specific Comparison Logic
-                if etype == "temperature" and city_data:
-                    thresh = self.parse_temp_threshold(title)
-                    if thresh:
-                        forecast_max = await self.get_forecast_max_temp(session, city_data[0], city_data[1], date_str)
-                        if forecast_max is not None:
-                            # Convert forecast (usually C) if market is F
-                            target_val = forecast_max
-                            if thresh["unit"] == "F":
-                                target_val = (forecast_max * 9/5) + 32
+                # B. Temperature and Precipitation Logic (with Local Caching)
+                if etype in ["temperature", "rain"] and city_data:
+                    cache_key = f"{location}_{date_str}_{etype}"
 
-                            # Comparison
-                            edge_val = target_val - (thresh.get("value") or thresh.get("min") or 0)
-                            if thresh["type"] == "exact":
-                                abs_diff = abs(target_val - thresh["value"])
-                                if abs_diff < 0.5: confidence = 0.85
-                                elif abs_diff > 1.5: confidence = 0.15
-                                else: confidence = 0.5
-                            elif thresh["type"] == "at_least":
-                                if edge_val > 1.0: confidence = 0.92
-                                elif edge_val < -1.0: confidence = 0.08
-                                else: confidence = 0.5
-                            elif thresh["type"] == "less_than":
-                                if edge_val < -1.0: confidence = 0.92
-                                elif edge_val > 1.0: confidence = 0.08
-                                else: confidence = 0.5
-                            elif thresh["type"] == "range":
-                                if thresh["min"] <= target_val <= thresh["max"]:
-                                    confidence = 0.90
-                                else:
-                                    # If it's outside the range by a good margin, NO is the bet
-                                    if target_val < (thresh["min"] - 1.0) or target_val > (thresh["max"] + 1.0):
-                                        confidence = 0.10
-                                    else:
-                                        confidence = 0.5
+                    if etype == "temperature":
+                        thresh = self.parse_temp_threshold(title)
+                        if thresh:
+                            if cache_key not in local_forecast_cache:
+                                local_forecast_cache[cache_key] = await self.get_forecast_max_temp(session, city_data[0], city_data[1], date_str)
 
-                            self.add_log(f"  [DATA] {location} Temp Forecast: {target_val:.1f}{thresh['unit']} vs Market: {thresh['type']} {thresh.get('value') or thresh.get('min')}. Edge: {edge_val:+.1f}. Conf -> {confidence:.2f}")
+                            forecast_max = local_forecast_cache[cache_key]
+                            if forecast_max is not None:
+                                target_val = forecast_max
+                                if thresh["unit"] == "F": target_val = (forecast_max * 9/5) + 32
 
-                elif etype == "rain" and city_data:
-                    # Check for precipitation sum or just probability
-                    precip_sum = await self.get_forecast_precipitation(session, city_data[0], city_data[1], date_str)
-                    if precip_sum is not None:
-                         # Polymarket often asks for mm in March, etc.
-                         thresh = re.search(r"(\d+(?:\.\d+)?)\s*mm", title, re.IGNORECASE)
-                         if thresh:
-                             thresh_val = float(thresh.group(1))
-                             # Simple comparison for monthly sum is hard with daily forecast,
-                             # but for daily markets it works.
-                             if "in march" in title.lower():
-                                 # This would need historical + monthly forecast.
-                                 # For now, let's just stick to daily max prob as alpha.
-                                 pass
+                                # Comparison with Edge for NO betting
+                                edge_val = target_val - (thresh.get("value") or thresh.get("min") or 0)
+                                if thresh["type"] == "exact":
+                                    abs_diff = abs(target_val - thresh["value"])
+                                    if abs_diff < 0.5: confidence = 0.85
+                                    elif abs_diff > 1.5: confidence = 0.15
+                                elif thresh["type"] == "at_least":
+                                    if edge_val > 1.0: confidence = 0.92
+                                    elif edge_val < -1.0: confidence = 0.08
+                                elif thresh["type"] == "less_than":
+                                    if edge_val < -1.0: confidence = 0.92
+                                    elif edge_val > 1.0: confidence = 0.08
+                                elif thresh["type"] == "range":
+                                    if thresh["min"] <= target_val <= thresh["max"]: confidence = 0.90
+                                    elif target_val < (thresh["min"] - 1.0) or target_val > (thresh["max"] + 1.0): confidence = 0.10
 
-                    prob = await self.get_openmeteo_forecast(session, city_data[0], city_data[1], date_str)
-                    if prob is not None:
-                        confidence = prob
-                        self.add_log(f"  [DATA] {location} Rain Probability: {prob:.0%}. Conf -> {confidence:.2f}")
+                                self.add_log(f"  [DATA] {location} Temp: {target_val:.1f}{thresh['unit']} vs Market: {thresh['type']} {thresh.get('value') or thresh.get('min')}. Conf -> {confidence:.2f}", "DEBUG")
 
-                # C. Global Ranking / NASA Anomaly logic
+                    elif etype == "rain":
+                        if cache_key not in local_forecast_cache:
+                            local_forecast_cache[cache_key] = await self.get_openmeteo_forecast(session, city_data[0], city_data[1], date_str)
+
+                        prob = local_forecast_cache[cache_key]
+                        if prob is not None:
+                            confidence = prob
+                            # For ranges like 190-200mm, we need more advanced sum logic,
+                            # but for probability, we bet NO if prob is very low
+                            if prob < 0.10: confidence = 0.05
+                            elif prob > 0.90: confidence = 0.95
+
+                # C. Hottest Year Rankings (Mutual Exclusion Logic)
                 if "hottest years on record" in title.lower() and self.nasa_anomaly is not None:
-                    # If NASA anomaly is significantly positive, high rank (1st-3rd) is likely
-                    if self.nasa_anomaly > 0.8:
-                        if any(kw in title.lower() for kw in ["hottest", "first", "1st"]): confidence = 0.92
-                        elif any(kw in title.lower() for kw in ["second", "2nd"]): confidence = 0.88
-                        elif any(kw in title.lower() for kw in ["third", "3rd"]): confidence = 0.80
-                    self.add_log(f"  [NASA] Global Anomaly: {self.nasa_anomaly}°C. Adjusting Confidence for ranking market.")
+                    if self.nasa_anomaly > 1.15: # Extreme anomaly, almost certainly #1
+                        if any(kw in title.lower() for kw in ["hottest", "first", "1st"]): confidence = 0.98
+                        else: confidence = 0.02 # All other ranks are NO
+                    elif self.nasa_anomaly > 0.95: # Very hot, likely #2 or #3
+                        if any(kw in title.lower() for kw in ["second", "2nd"]): confidence = 0.85
+                        elif any(kw in title.lower() for kw in ["third", "3rd"]): confidence = 0.70
+                        elif any(kw in title.lower() for kw in ["hottest", "first", "1st"]): confidence = 0.15
+                        else: confidence = 0.10
+                    elif self.nasa_anomaly < 0.5: # Cool year relative to trend
+                        if "lower" in title.lower() or "6th" in title.lower(): confidence = 0.80
+                        else: confidence = 0.20
+                    self.add_log(f"  [NASA] Global Anomaly: {self.nasa_anomaly}°C. Mutual Exclusion adjustment for ranking.")
 
-                # D. Arctic Sea Ice Logic
+                # D. Arctic Sea Ice
                 if "arctic sea ice" in title.lower() and self.nasa_anomaly is not None:
-                    # Higher anomaly usually means lower ice extent
                     if self.nasa_anomaly > 1.0 and any(kw in title.lower() for kw in ["min", "minimum", "lowest"]):
-                        confidence = 0.85
-                        self.add_log(f"  [NASA] Using Global Warming trend as proxy for Arctic Ice. Confidence -> {confidence:.2f}")
+                        confidence = 0.88
+
+                # E. Earthquake Logic (Mutual Exclusion)
+                if "earthquake" in title.lower() and "magnitude" in title.lower():
+                    exactly_match = re.search(r"exactly (\d+)", title, re.IGNORECASE)
+                    more_than_match = re.search(r"more than (\d+)", title, re.IGNORECASE)
+
+                    # Determine Magnitude threshold
+                    mag_val = 6.5
+                    mag_match = re.search(r"(\d+\.\d+)", title)
+                    if mag_match: mag_val = float(mag_match.group(1))
+
+                    # Fetch current count for the period (assuming weekly/monthly)
+                    # Use the parsed market date as the end bound
+                    end_bound = date_str if "-" in date_str and len(date_str) > 7 else "2026-03-22"
+                    start_bound = (datetime.strptime(end_bound, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
+
+                    current_count = await self.fetch_earthquake_count(session, mag_val, start_bound, end_bound)
+                    self.add_log(f"  [DATA] Global {mag_val}+ Earthquake count ({start_bound} to {end_bound}): {current_count}")
+
+                    if exactly_match:
+                        target_n = int(exactly_match.group(1))
+                        if current_count > target_n: confidence = 0.01 # Impossible
+                        elif current_count == target_n: confidence = 0.75 # Current winner
+                        elif current_count < target_n - 2: confidence = 0.10 # Unlikely to reach
+                    elif more_than_match:
+                        target_n = int(more_than_match.group(1))
+                        if current_count > target_n: confidence = 0.99 # Already happened
 
                 # 4. Final Trade Execution
                 if confidence != 0.5:

@@ -57,26 +57,18 @@ def create_app():
 
         return jsonify({"status": "success", "is_trading": bot_instance.is_trading})
 
-    @socketio.on('request_update')
-    def handle_update():
+    @socketio.on('connect')
+    def handle_connect():
         global bot_instance
         if not bot_instance:
             bot_instance = WeatherBot(bot_config)
             bot_instance.initialize()
+        socketio.emit('bot_status', bot_instance.get_status())
 
+    @socketio.on('request_update')
+    def handle_update():
         if bot_instance:
             socketio.emit('bot_status', bot_instance.get_status())
-        else:
-            socketio.emit('bot_status', {
-                "is_running": False,
-                "is_trading": False,
-                "metrics": {"total_trades": 0, "win_rate": 0, "total_profit": 0, "balance": bot_config["paper_balance"]},
-                "open_positions": [],
-                "scanned_markets": [],
-                "news_events": [],
-                "logs": ["Bot offline."],
-                "config": {k: v for k, v in bot_config.items() if "key" not in k}
-            })
 
     # Background thread to emit updates periodically
     def background_update_loop():
