@@ -408,8 +408,8 @@ class WeatherBot:
                                 title = m.get("question", "").lower()
                                 volume = float(m.get("volume", 0))
 
-                                # Volume filter: Discard markets with less than $100 volume
-                                if volume < 100: continue
+                                # Volume filter: Discard markets with less than $500 volume
+                                if volume < 500: continue
 
                                 # Simple filter for tags as they are already weather-focused
                                 if not any(b in title for b in blacklist):
@@ -440,8 +440,8 @@ class WeatherBot:
                             full_text = title + " " + desc
                             volume = float(m.get("volume", 0))
 
-                            # Volume filter: Discard markets with less than $100 volume
-                            if volume < 100: continue
+                            # Volume filter: Discard markets with less than $500 volume
+                            if volume < 500: continue
 
                             if any(b in title for b in blacklist): continue
                             if any(b in desc for b in ["ceasefire", "ukraine", "russia", "qualify", "world cup"]): continue
@@ -613,7 +613,7 @@ class WeatherBot:
 
         # Volume filter
         volume = float(market.get("volume", 0))
-        if volume < 100:
+        if volume < 500:
             self.add_log(f"Low volume ({volume}) for market {market.get('id')}, skipping.", "DEBUG")
             return
 
