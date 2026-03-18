@@ -140,11 +140,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (data.scanned_markets && data.scanned_markets.length > 0) {
             scanTable.innerHTML = data.scanned_markets.map(m => {
                 const displayTitle = m.question.length > 85 ? m.question.substring(0, 82) + '...' : m.question;
+                const statusTag = m.is_new ? '<span class="side-badge yes" style="padding: 2px 6px; font-size: 0.7rem;">New</span>' : '<span style="color: var(--text-dim); font-size: 0.8rem;">Watching</span>';
                 return `
                     <tr>
                         <td title="${m.question}">${displayTitle}</td>
                         <td>$${Math.round(m.volume).toLocaleString()}</td>
-                        <td><span style="color: var(--accent-blue)">Watching</span></td>
+                        <td>${statusTag}</td>
                     </tr>
                 `;
             }).join('');
@@ -175,8 +176,7 @@ document.addEventListener('DOMContentLoaded', () => {
             scan_interval: parseInt(document.getElementById('s-interval').value),
             paper_balance: parseFloat(document.getElementById('s-balance').value),
             max_trades: parseInt(document.getElementById('s-max-trades').value),
-            private_key: document.getElementById('s-pk').value,
-            wallet_address: document.getElementById('s-wallet').value
+            private_key: document.getElementById('s-pk').value
         };
 
         fetch('/api/config', {

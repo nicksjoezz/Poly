@@ -10,8 +10,7 @@ socketio = SocketIO(cors_allowed_origins="*")
 # Shared bot instance
 bot_instance = None
 bot_config = {
-    "private_key": os.getenv("PRIVATE_KEY", "0x0000000000000000000000000000000000000000000000000000000000000000"),
-    "wallet_address": os.getenv("WALLET_ADDRESS", "0x0000000000000000000000000000000000000000"),
+    "private_key": os.getenv("PRIVATE_KEY", ""),
     "trade_amount": 10.0,
     "min_edge": 0.20,
     "scan_interval": 2,
@@ -35,6 +34,13 @@ def create_app():
         global bot_config
         if request.method == 'POST':
             new_config = request.json
+            # Convert numeric types
+            if "trade_amount" in new_config: new_config["trade_amount"] = float(new_config["trade_amount"])
+            if "min_edge" in new_config: new_config["min_edge"] = float(new_config["min_edge"])
+            if "scan_interval" in new_config: new_config["scan_interval"] = int(new_config["scan_interval"])
+            if "paper_balance" in new_config: new_config["paper_balance"] = float(new_config["paper_balance"])
+            if "max_trades" in new_config: new_config["max_trades"] = int(new_config["max_trades"])
+
             bot_config.update(new_config)
             if bot_instance:
                 bot_instance.config = bot_config

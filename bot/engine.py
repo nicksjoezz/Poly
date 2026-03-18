@@ -197,6 +197,7 @@ class WeatherBot:
         self.is_running = False
         self.is_trading = False
         self.traded_tokens = set()
+        self.seen_market_ids = set()
         self.active_snipes = set()
         self.nasa_anomaly = None
         self.scanned_markets = []
@@ -207,7 +208,7 @@ class WeatherBot:
             "total_trades": 0,
             "win_rate": 0.0,
             "total_profit": 0.0,
-            "balance": config.get("paper_balance", 1000.0) if config.get("paper_mode", True) else 0.0,
+            "balance": float(config.get("paper_balance", 1000.0)) if config.get("paper_mode", True) else 0.0,
             "max_trades": config.get("max_trades", 10)
         }
         self.logs = []
@@ -553,41 +554,58 @@ class WeatherBot:
 
     async def get_vwap_price(self, token_id: str, side: str, size: float) -> float | None:
         try:
+            if not self.clob_client: return None
+            # Fetch orderbook from CLOB
             book = await asyncio.to_thread(self.clob_client.get_order_book, token_id)
             levels = book.asks if side == "BUY" else book.bids
-            acc_size, total_cost = 0.0, 0.0
+            if not levels: return None
 
+            acc_size, total_cost = 0.0, 0.0
             for level in levels:
                 price, vol = float(level.price), float(level.size)
                 take = min(vol, size - acc_size)
                 total_cost += take * price
                 acc_size += take
                 if acc_size >= size: return total_cost / size
+
+            # If we didn't fill the whole size, return None or partial VWAP
+            if acc_size > 0: return total_cost / acc_size
             return None
-        except Exception: return None
+        except Exception as e:
+            log.debug(f"Error fetching VWAP for {token_id}: {e}")
+            return None
 
     async def execute_trade(self, market: dict, confidence: float, event_type: str):
-        if not self.is_trading: return
+        if not self.is_trading:
+            return
 
         # Check Max Trades Limit
         if len(self.open_positions) >= self.config.get("max_trades", 10):
+            log.debug("Max trades reached, skipping.")
             return
 
         tokens = market.get("clobTokenIds", [])
         if isinstance(tokens, str):
-            import json
             try:
                 tokens = json.loads(tokens)
             except:
+                log.debug(f"Failed to parse tokens for market {market.get('id')}")
                 return
-        if not tokens or len(tokens) < 2: return
+        if not tokens or len(tokens) < 2:
+            log.debug(f"Insufficient tokens for market {market.get('id')}")
+            return
 
         yes_token = tokens[0]
         no_token = tokens[1]
 
-        if yes_token in self.traded_tokens or no_token in self.traded_tokens: return
-        # In live mode we care about volume, but in paper mode or tests we may allow lower volume
-        if not self.config.get("paper_mode", True) and float(market.get("volume", 0)) < 500: return
+        if yes_token in self.traded_tokens or no_token in self.traded_tokens:
+            return
+
+        # Volume filter
+        volume = float(market.get("volume", 0))
+        if volume < 500:
+            log.debug(f"Low volume ({volume}) for market {market.get('id')}, skipping.")
+            return
 
         if event_type == "temperature" and self.nasa_anomaly is not None:
             thresh_info = self.parse_temp_threshold(market.get("question", ""))
@@ -604,14 +622,13 @@ class WeatherBot:
                     elif self.nasa_anomaly < -0.5:
                         confidence = min(confidence, 0.15)
 
-        # Calculate Edge for YES
-        vwap_yes = await self.get_vwap_price(yes_token, "BUY", self.config["trade_amount"])
-        # Calculate Edge for NO (Price of NO is effectively 1 - Price of YES, but we get real book)
-        vwap_no = await self.get_vwap_price(no_token, "BUY", self.config["trade_amount"])
+        # Calculate Edge for YES and NO
+        vwap_yes, vwap_no = await asyncio.gather(
+            self.get_vwap_price(yes_token, "BUY", self.config["trade_amount"]),
+            self.get_vwap_price(no_token, "BUY", self.config["trade_amount"])
+        )
 
         taker_fee = 0.015
-
-        # Logic to decide between YES and NO
         target_side = None
         target_token = None
         best_vwap = 0
@@ -620,24 +637,31 @@ class WeatherBot:
         # YES Edge
         if vwap_yes:
             edge_yes = confidence - vwap_yes - taker_fee
+            log.debug(f"Market {market.get('id')} YES Edge: {edge_yes:.4f} (Conf: {confidence:.2f}, VWAP: {vwap_yes:.4f})")
             if edge_yes >= self.config["min_edge"]:
                 target_side = "YES"
                 target_token = yes_token
                 best_vwap = vwap_yes
                 best_edge = edge_yes
+        else:
+            log.debug(f"No orderbook for YES token {yes_token}")
 
-        # NO Edge (Confidence of NO is 1 - confidence of YES)
+        # NO Edge
         if vwap_no:
             conf_no = 1.0 - confidence
             edge_no = conf_no - vwap_no - taker_fee
+            log.debug(f"Market {market.get('id')} NO Edge: {edge_no:.4f} (Conf: {conf_no:.2f}, VWAP: {vwap_no:.4f})")
             if edge_no >= self.config["min_edge"] and edge_no > best_edge:
                 target_side = "NO"
                 target_token = no_token
                 best_vwap = vwap_no
                 best_edge = edge_no
+        else:
+            log.debug(f"No orderbook for NO token {no_token}")
 
         if target_side:
-            self.add_log(f"[{market['question'][:40]}...] Target: {target_side} | Conf: {confidence if target_side=='YES' else 1-confidence:.2f} | VWAP: {best_vwap:.2f} | Edge: {best_edge:+.2f}")
+            self.add_log(f"Opportunity Found: {target_side} for '{market['question'][:50]}...'")
+            self.add_log(f"Stats: Conf={confidence if target_side=='YES' else 1-confidence:.2f}, VWAP={best_vwap:.2f}, Edge={best_edge:+.2f}")
             self.add_log(f"🚨 EXECUTING BUY {target_side} for ${self.config['trade_amount']}")
 
             if not self.config["paper_mode"]:
@@ -765,10 +789,22 @@ class WeatherBot:
 
             # 2. Discover ALL Weather Markets via Tags & Keywords
             self.add_log("Discovering Polymarket weather contracts...")
-            new_markets = await self.fetch_all_weather_markets(session)
-            if new_markets:
-                self.scanned_markets = [{"question": m["question"], "volume": float(m.get("volume", 0))} for m in new_markets]
-            cached_markets = new_markets
+            discovered = await self.fetch_all_weather_markets(session)
+
+            # Identify which markets are "new" since the bot started
+            for m in discovered:
+                mid = m.get("id")
+                if mid and mid not in self.seen_market_ids:
+                    m["is_new"] = True
+                    # self.add_log(f"✨ New Market Detected: {m.get('question')[:60]}...")
+                    self.seen_market_ids.add(mid)
+                else:
+                    m["is_new"] = False
+
+            if discovered:
+                self.scanned_markets = [{"id": m["id"], "question": m["question"], "volume": float(m.get("volume", 0)), "is_new": m.get("is_new")} for m in discovered]
+
+            cached_markets = discovered
             self.add_log(f"Discovered {len(cached_markets)} weather markets.")
 
             # 3. Process Each Market: Analyze supporting news/data and compare
@@ -986,10 +1022,11 @@ class WeatherBot:
         if self.is_running: return
         self.is_running = True
         self.add_log("Background Scanner initialized.")
-        log.info("Background Scanner initialized.")
 
-        # Initialize CLOB Client for price fetching
-        self.clob_client = ClobClient("https://clob.polymarket.com", key="0"*64, chain_id=137)
+        # Initialize CLOB Client for price fetching (Paper Mode/Discovery)
+        # Using a fixed placeholder for discovery and paper mode
+        dummy_key = "0x" + "1" * 64
+        self.clob_client = ClobClient("https://clob.polymarket.com", key=dummy_key, chain_id=137)
 
         import threading
         def run_in_thread():
@@ -1009,9 +1046,28 @@ class WeatherBot:
         if not self.is_running: self.initialize()
         self.is_trading = True
         self.add_log("Trading activity started.")
+
         if not self.config["paper_mode"]:
             try:
-                self.clob_client = ClobClient("https://clob.polymarket.com", key=self.config["private_key"], chain_id=137, signature_type=0, funder=self.config["wallet_address"])
+                pk = self.config.get("private_key")
+                if not pk:
+                    raise ValueError("Private key missing for live mode")
+                if not pk.startswith("0x"):
+                    pk = "0x" + pk
+
+                # Extract wallet address from private key
+                account = Account.from_key(pk)
+                wallet_address = account.address
+                self.config["wallet_address"] = wallet_address
+
+                self.add_log(f"Initializing Live Client for: {wallet_address}")
+                self.clob_client = ClobClient(
+                    "https://clob.polymarket.com",
+                    key=pk,
+                    chain_id=137,
+                    signature_type=0,
+                    funder=wallet_address
+                )
                 self.clob_client.set_api_creds(self.clob_client.create_or_derive_api_creds())
             except Exception as e:
                 self.add_log(f"Failed to initialize live CLOB client: {e}", "ERROR")
