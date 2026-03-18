@@ -445,24 +445,96 @@ class WeatherBot:
 
     def parse_temp_threshold(self, title: str) -> dict | None:
         """Parses value and unit from title, e.g., '80°F' or '30°C'."""
-        # Match Fahrenheit
+        # Handle ranges like "between 60 and 70"
+        range_match = re.search(r"between (\d+(?:\.\d+)?)\s*(?:and|to)\s*(\d+(?:\.\d+)?)", title, re.IGNORECASE)
+        if range_match:
+            v1, v2 = float(range_match.group(1)), float(range_match.group(2))
+            unit = "C" # Default for Polymarket usually, but let's check title
+            if "°f" in title.lower() or "fahrenheit" in title.lower(): unit = "F"
+            return {"type": "range", "min": v1, "max": v2, "unit": unit}
+
+        # Handle "100 or more" or "at least 100"
+        at_least_match = re.search(r"(\d+(?:\.\d+)?)\s*or more|at least\s*(\d+(?:\.\d+)?)", title, re.IGNORECASE)
+        if at_least_match:
+            val = float(at_least_match.group(1) or at_least_match.group(2))
+            unit = "C"
+            if "°f" in title.lower() or "fahrenheit" in title.lower(): unit = "F"
+            return {"type": "at_least", "value": val, "unit": unit}
+
+        # Handle "less than 60"
+        less_than_match = re.search(r"less than\s*(\d+(?:\.\d+)?)", title, re.IGNORECASE)
+        if less_than_match:
+            val = float(less_than_match.group(1))
+            unit = "C"
+            if "°f" in title.lower() or "fahrenheit" in title.lower(): unit = "F"
+            return {"type": "less_than", "value": val, "unit": unit}
+
+        # Match Fahrenheit simple
         f_match = re.search(r"(\d+(?:\.\d+)?)\s*°?F", title, re.IGNORECASE)
         if f_match:
-            return {"value": float(f_match.group(1)), "unit": "F"}
+            return {"type": "exact", "value": float(f_match.group(1)), "unit": "F"}
 
-        # Match Celsius
+        # Match Celsius simple
         c_match = re.search(r"(\d+(?:\.\d+)?)\s*°?C", title, re.IGNORECASE)
         if c_match:
-            return {"value": float(c_match.group(1)), "unit": "C"}
+            return {"type": "exact", "value": float(c_match.group(1)), "unit": "C"}
 
         # Match plain number if 'degrees' is mentioned
         if "degrees" in title.lower():
             n_match = re.search(r"(\d+(?:\.\d+)?)", title)
             if n_match:
-                # Default to F if it's high (likely US market), else C
                 val = float(n_match.group(1))
                 unit = "F" if val > 45 else "C"
-                return {"value": val, "unit": unit}
+                return {"type": "exact", "value": val, "unit": unit}
+
+        return None
+
+    def parse_market_date(self, text: str) -> str | None:
+        """Extracts date from market text. Returns YYYY-MM-DD, YYYY-MM, or YYYY."""
+        # Try full date: March 19, 2026
+        full_date = re.search(r"(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2}),?\s+(\d{4})", text, re.IGNORECASE)
+        if full_date:
+            month_map = {"january":"01","february":"02","march":"03","april":"04","may":"05","june":"06","july":"07","august":"08","september":"09","october":"10","november":"11","december":"12"}
+            m = month_map[full_date.group(1).lower()]
+            d = full_date.group(2).zfill(2)
+            y = full_date.group(3)
+            return f"{y}-{m}-{d}"
+
+        # Try day of year without year: March 19
+        day_month = re.search(r"(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})\b", text, re.IGNORECASE)
+        if day_month:
+            month_map = {"january":"01","february":"02","march":"03","april":"04","may":"05","june":"06","july":"07","august":"08","september":"09","october":"10","november":"11","december":"12"}
+            m = month_map[day_month.group(1).lower()]
+            d = day_month.group(2).zfill(2)
+            return f"2026-{m}-{d}" # Default to 2026 as per markets
+
+        # Try month only: in March
+        month_only = re.search(r"in (january|february|march|april|may|june|july|august|september|october|november|december)\b", text, re.IGNORECASE)
+        if month_only:
+            month_map = {"january":"01","february":"02","march":"03","april":"04","may":"05","june":"06","july":"07","august":"08","september":"09","october":"10","november":"11","december":"12"}
+            m = month_map[month_only.group(1).lower()]
+            return f"2026-{m}"
+
+        # Try year only: in 2026
+        year_match = re.search(r"\b(202\d)\b", text)
+        if year_match:
+            return year_match.group(1)
+
+        return None
+
+    def parse_market_location(self, text: str) -> str | None:
+        """Identifies location from market text."""
+        text = text.lower()
+        for city in CITY_DB:
+            if re.search(rf"\b{city}\b", text):
+                return city
+        for alias, real in CITY_ALIASES.items():
+            if re.search(rf"\b{alias}\b", text):
+                return real
+
+        # Default for global/scientific markets
+        if any(kw in text for kw in ["worldwide", "global", "earthquakes", "on record", "sea ice"]):
+            return "global"
 
         return None
 
@@ -567,12 +639,37 @@ class WeatherBot:
         finally:
             self.active_snipes.discard(snipe_key)
 
+    async def get_forecast_max_temp(self, session: aiohttp.ClientSession, lat: float, lon: float, date_str: str) -> float | None:
+        """Gets max temperature for a specific date from Open-Meteo."""
+        try:
+            url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&daily=temperature_2m_max&timezone=auto"
+            async with session.get(url) as resp:
+                data = await resp.json()
+                if "daily" in data and date_str in data["daily"]["time"]:
+                    idx = data["daily"]["time"].index(date_str)
+                    return data["daily"]["temperature_2m_max"][idx]
+            return None
+        except Exception: return None
+
+    async def get_forecast_precipitation(self, session: aiohttp.ClientSession, lat: float, lon: float, date_str: str) -> float | None:
+        """Gets total precipitation for a specific date from Open-Meteo."""
+        try:
+            url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&daily=precipitation_sum&timezone=auto"
+            async with session.get(url) as resp:
+                data = await resp.json()
+                if "daily" in data and date_str in data["daily"]["time"]:
+                    idx = data["daily"]["time"].index(date_str)
+                    return data["daily"]["precipitation_sum"][idx]
+            return None
+        except Exception: return None
+
     async def run_pipeline(self):
         self.add_log("=== Pipeline Scan Started ===")
         timeout = aiohttp.ClientTimeout(total=30)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             if self.nasa_anomaly is None: await self.update_nasa_anomaly(session)
 
+            # 1. Fetch Alpha Alerts
             self.add_log("Fetching alerts from NOAA, GDACS, MeteoAlarm, and ReliefWeb...")
             alert_tasks = [
                 self.fetch_noaa_alerts(session),
@@ -582,106 +679,142 @@ class WeatherBot:
             ]
             alert_results = await asyncio.gather(*alert_tasks, return_exceptions=True)
 
-            all_events = []
+            all_alerts = []
             for i, r in enumerate(alert_results):
                 source = ["NOAA", "GDACS", "MeteoAlarm", "ReliefWeb"][i]
-                if isinstance(r, Exception):
-                    self.add_log(f"Error fetching from {source}: {r}", "ERROR")
-                elif isinstance(r, list):
-                    all_events.extend(r)
-                    self.add_log(f"Fetched {len(r)} alerts from {source}")
+                if isinstance(r, list): all_alerts.extend(r)
 
-            self.news_events = [{"source": e.source, "location": e.location, "type": e.event_type, "conf": e.confidence, "desc": e.description} for e in all_events]
+            self.news_events = [{"source": e.source, "location": e.location, "type": e.event_type, "conf": e.confidence, "desc": e.description} for e in all_alerts]
 
-            self.add_log("Fetching markets from Polymarket Gamma API...")
-            try:
-                cached_markets = await self.fetch_all_weather_markets(session)
-                self.scanned_markets = [{"question": m["question"], "volume": float(m.get("volume", 0))} for m in cached_markets]
-                self.add_log(f"Fetched {len(cached_markets)} markets from Polymarket")
-            except Exception as e:
-                self.add_log(f"Error fetching Polymarket markets: {e}", "ERROR")
-                cached_markets = []
+            # 2. Discover ALL Weather Markets via Tags & Keywords
+            self.add_log("Discovering Polymarket weather contracts...")
+            cached_markets = await self.fetch_all_weather_markets(session)
+            self.scanned_markets = [{"question": m["question"], "volume": float(m.get("volume", 0))} for m in cached_markets]
+            self.add_log(f"Discovered {len(cached_markets)} weather markets.")
 
-            self.add_log(f"Summary: {len(all_events)} active global alerts. {len(cached_markets)} weather markets.")
-
-            # NEW: Analyze markets against alerts to find opportunities
+            # 3. Process Each Market: Analyze supporting news/data and compare
             for m in cached_markets:
-                title = m.get("question", "").lower()
-                desc = m.get("description", "").lower()
-                text = title + " " + desc
+                title = m.get("question", "")
+                full_text = (title + " " + m.get("description", "")).lower()
 
-                # Check each alert to see if it relates to this market
-                for ev in all_events:
-                    # Match location
-                    loc_variants = [ev.location.lower()]
-                    for alias, real_name in CITY_ALIASES.items():
-                        if real_name == ev.location.lower():
-                            loc_variants.append(alias)
+                # Proactive discovery: if volume is high, ensure we check for news
+                market_vol = float(m.get("volume", 0))
 
-                    has_loc = any(re.search(rf"\b{v}\b", text) for v in loc_variants)
+                location = self.parse_market_location(full_text)
+                date_str = self.parse_market_date(title)
 
-                    # Match event type
-                    type_synonyms = SYNONYMS.get(ev.event_type, [ev.event_type])
-                    has_type = any(re.search(rf"\b{s}\b", text) for s in type_synonyms)
+                # Determine event type
+                etype = "unknown"
+                for t, synonyms in SYNONYMS.items():
+                    if any(re.search(rf"\b{s}\b", full_text) for s in synonyms):
+                        etype = t
+                        break
 
-                    if has_loc and has_type:
-                        self.add_log(f"🔔 Market Opportunity Identified: '{m.get('question')[:50]}...' supported by {ev.source} alert for {ev.location} ({ev.event_type}) with {ev.confidence:.0%} confidence.")
+                self.add_log(f"Analyzing Market: {title[:50]}... (Loc: {location}, Date: {date_str}, Type: {etype})", "DEBUG")
 
-            deduped = {}
-            for ev in all_events:
-                k = f"{ev.location}_{ev.date}_{ev.event_type}"
-                if k not in deduped or ev.confidence > deduped[k].confidence:
-                    deduped[k] = ev
+                if not location or not date_str:
+                    continue
 
-            for city, data in CITY_DB.items():
-                if not data[3]:
-                    target_date = self.get_local_date(city)
-                    k = f"{city}_{target_date}_rain"
-                    if k not in deduped:
-                        prob = await self.get_openmeteo_forecast(session, data[0], data[1], target_date)
-                        if prob and (prob > 0.60 or prob < 0.25):
-                            deduped[k] = WeatherEvent("FORECAST", "rain", city, target_date, prob, f"Pure forecast: {prob:.0%}")
-                            await asyncio.sleep(0.1)
+                city_data = CITY_DB.get(location)
+                confidence = 0.5 # Default neutral
 
-            for key, event in deduped.items():
-                if not self.is_running: break
-                city_data = CITY_DB.get(event.location)
-                if not city_data: continue
+                # A. Check for matching News Alerts (Location + Event Type + Keywords)
+                # If market is high volume, try a specific query to news sources if not already caught
+                if market_vol > 5000 and location:
+                    # Logic to fetch specifically for this market would go here if APIs supported it easily.
+                    # For now we rely on our broad ingestion which covers major events.
+                    pass
 
-                if event.source != "FORECAST":
-                    forecast = await self.get_openmeteo_forecast(session, city_data[0], city_data[1], event.date)
-                    combined_conf = (event.confidence * 0.6) + (forecast * 0.4) if forecast else event.confidence
-                else:
-                    combined_conf = event.confidence
+                matching_alerts = []
+                for a in all_alerts:
+                    loc_match = a.location == location
+                    type_match = a.event_type == etype
 
-                # Refined matching: location (or alias) + event_type (or synonym) must both be present
-                matched_markets = []
-                loc_variants = [event.location.lower()]
-                for alias, real_name in CITY_ALIASES.items():
-                    if real_name == event.location.lower():
-                        loc_variants.append(alias)
+                    # Fuzzy match: does the market question share significant words with the alert description?
+                    market_words = set(re.findall(r"\w+", title.lower()))
+                    alert_words = set(re.findall(r"\w+", a.description.lower()))
+                    overlap = market_words.intersection(alert_words)
+                    # Filter out common stop words if necessary, but overlap count is a good heuristic
 
-                type_synonyms = SYNONYMS.get(event.event_type, [event.event_type])
+                    if loc_match and (type_match or len(overlap) >= 3):
+                        matching_alerts.append(a)
 
-                for m in cached_markets:
-                    text = (m.get("question","") + " " + m.get("description","")).lower()
+                if matching_alerts:
+                    best_alert = max(matching_alerts, key=lambda a: a.confidence)
+                    # If we have a news match, we boost confidence
+                    confidence = max(confidence, best_alert.confidence)
+                    self.add_log(f"  [NEWS] Reference found in {best_alert.source} for {location}. Overlap: {len(market_words.intersection(alert_words))} words. Confidence -> {confidence:.2f}")
 
-                    has_loc = any(re.search(rf"\b{v}\b", text) for v in loc_variants)
-                    has_type = any(re.search(rf"\b{s}\b", text) for s in type_synonyms)
+                # B. Data-specific Comparison Logic
+                if etype == "temperature" and city_data:
+                    thresh = self.parse_temp_threshold(title)
+                    if thresh:
+                        forecast_max = await self.get_forecast_max_temp(session, city_data[0], city_data[1], date_str)
+                        if forecast_max is not None:
+                            # Convert forecast (usually C) if market is F
+                            target_val = forecast_max
+                            if thresh["unit"] == "F":
+                                target_val = (forecast_max * 9/5) + 32
 
-                    if has_loc and has_type:
-                        self.add_log(f"Matched Market: {m.get('question')} (Location: {event.location}, Type: {event.event_type})")
-                        matched_markets.append(m)
+                            # Comparison
+                            edge_val = target_val - thresh.get("value", 0)
+                            if thresh["type"] == "exact":
+                                abs_diff = abs(target_val - thresh["value"])
+                                if abs_diff < 0.5: confidence = 0.85
+                                elif abs_diff > 1.5: confidence = 0.15
+                                else: confidence = 0.5
+                            elif thresh["type"] == "at_least":
+                                if edge_val > 1.0: confidence = 0.92
+                                elif edge_val < -1.0: confidence = 0.08
+                                else: confidence = 0.5
+                            elif thresh["type"] == "less_than":
+                                if edge_val < -1.0: confidence = 0.92
+                                elif edge_val > 1.0: confidence = 0.08
+                                else: confidence = 0.5
 
-                if matched_markets:
-                    for market in matched_markets:
-                        await self.execute_trade(market, combined_conf, event.event_type)
+                            self.add_log(f"  [DATA] {location} Temp Forecast: {target_val:.1f}{thresh['unit']} vs Market: {thresh['type']} {thresh.get('value') or thresh.get('min')}. Edge: {edge_val:+.1f}. Conf -> {confidence:.2f}")
 
-                elif not matched_markets and combined_conf >= 0.80 and event.source != "FORECAST":
-                    snipe_key = f"{event.location}_{event.event_type}_{event.date}"
-                    if snipe_key not in self.active_snipes:
-                        self.active_snipes.add(snipe_key)
-                        asyncio.create_task(self.sniper_task(event, combined_conf, snipe_key))
+                elif etype == "rain" and city_data:
+                    # Check for precipitation sum or just probability
+                    precip_sum = await self.get_forecast_precipitation(session, city_data[0], city_data[1], date_str)
+                    if precip_sum is not None:
+                         # Polymarket often asks for mm in March, etc.
+                         thresh = re.search(r"(\d+(?:\.\d+)?)\s*mm", title, re.IGNORECASE)
+                         if thresh:
+                             thresh_val = float(thresh.group(1))
+                             # Simple comparison for monthly sum is hard with daily forecast,
+                             # but for daily markets it works.
+                             if "in march" in title.lower():
+                                 # This would need historical + monthly forecast.
+                                 # For now, let's just stick to daily max prob as alpha.
+                                 pass
+
+                    prob = await self.get_openmeteo_forecast(session, city_data[0], city_data[1], date_str)
+                    if prob is not None:
+                        confidence = prob
+                        self.add_log(f"  [DATA] {location} Rain Probability: {prob:.0%}. Conf -> {confidence:.2f}")
+
+                # C. Global Ranking / NASA Anomaly logic
+                if "hottest years on record" in title.lower() and self.nasa_anomaly is not None:
+                    # If NASA anomaly is significantly positive, high rank (1st-3rd) is likely
+                    if self.nasa_anomaly > 0.8:
+                        if any(kw in title.lower() for kw in ["hottest", "first", "1st"]): confidence = 0.92
+                        elif any(kw in title.lower() for kw in ["second", "2nd"]): confidence = 0.88
+                        elif any(kw in title.lower() for kw in ["third", "3rd"]): confidence = 0.80
+                    self.add_log(f"  [NASA] Global Anomaly: {self.nasa_anomaly}°C. Adjusting Confidence for ranking market.")
+
+                # D. Arctic Sea Ice Logic
+                if "arctic sea ice" in title.lower() and self.nasa_anomaly is not None:
+                    # Higher anomaly usually means lower ice extent
+                    if self.nasa_anomaly > 1.0 and any(kw in title.lower() for kw in ["min", "minimum", "lowest"]):
+                        confidence = 0.85
+                        self.add_log(f"  [NASA] Using Global Warming trend as proxy for Arctic Ice. Confidence -> {confidence:.2f}")
+
+                # 4. Final Trade Execution
+                if confidence != 0.5:
+                    await self.execute_trade(m, confidence, etype)
+
+            self.add_log(f"Pipeline Scan Finished. Summary: {len(all_alerts)} alerts, {len(cached_markets)} markets analyzed.")
 
     async def _loop(self):
         while self.is_running:
