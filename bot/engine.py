@@ -944,7 +944,8 @@ class WeatherBot:
             "is_trading": self.is_trading,
             "metrics": self.metrics,
             "open_positions": self.open_positions,
-            "scanned_markets": self.scanned_markets[:20],
+            "scanned_markets": self.scanned_markets[:50],
+            "total_scanned": len(self.scanned_markets),
             "news_events": self.news_events[:20],
             "logs": self.logs[-20:],
             "config": {k: v for k, v in self.config.items() if "key" not in k} # Don't send keys to UI

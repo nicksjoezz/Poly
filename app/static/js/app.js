@@ -13,6 +13,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const mWinrate = document.getElementById('m-winrate');
     const mProfit = document.getElementById('m-profit');
     const mBalance = document.getElementById('m-balance');
+    const mMarkets = document.getElementById('m-markets');
 
     // Tables
     const positionsTable = document.getElementById('positions-table');
@@ -73,6 +74,7 @@ document.addEventListener('DOMContentLoaded', () => {
         mWinrate.innerText = data.metrics.win_rate + '%';
         mProfit.innerText = '$' + data.metrics.total_profit.toFixed(2);
         mBalance.innerText = '$' + data.metrics.balance.toLocaleString();
+        if (mMarkets) mMarkets.innerText = data.total_scanned || 0;
 
         // Update settings inputs with current values if not already focused
         if (data.config) {
@@ -108,6 +110,10 @@ document.addEventListener('DOMContentLoaded', () => {
         `).join('');
 
         // Update Scan
+        const scanCountBadge = document.getElementById('scan-count-badge');
+        if (scanCountBadge) {
+            scanCountBadge.innerText = `${data.total_scanned || data.scanned_markets.length} Markets Found`;
+        }
         scanTable.innerHTML = data.scanned_markets.map(m => `
             <tr>
                 <td>${m.question}</td>

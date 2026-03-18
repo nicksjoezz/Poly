@@ -65,6 +65,10 @@
                                 <span class="metric-value" id="m-balance">$0.00</span>
                                 <span class="metric-label">Balance</span>
                             </div>
+                            <div class="metric-item">
+                                <span class="metric-value" id="m-markets">0</span>
+                                <span class="metric-label">Markets Scanned</span>
+                            </div>
                         </div>
                     </div>
                     <div class="card">
@@ -100,7 +104,10 @@
             <!-- Market Scan Tab -->
             <section id="scan" class="tab-pane" style="display: none;">
                 <div class="card">
-                    <h3><i data-lucide="radar"></i> Polymarket Weather Scan</h3>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                        <h3 style="margin-bottom: 0;"><i data-lucide="radar"></i> Polymarket Weather Scan</h3>
+                        <span id="scan-count-badge" class="side-badge yes">0 Markets Found</span>
+                    </div>
                     <table class="data-table">
                         <thead>
                             <tr>
