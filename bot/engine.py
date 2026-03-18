@@ -204,7 +204,8 @@ class WeatherBot:
             "total_trades": 0,
             "win_rate": 0.0,
             "total_profit": 0.0,
-            "balance": config.get("paper_balance", 1000.0) if config.get("paper_mode", True) else 0.0
+            "balance": config.get("paper_balance", 1000.0) if config.get("paper_mode", True) else 0.0,
+            "max_trades": config.get("max_trades", 10)
         }
         self.logs = []
         self.clob_client = None
@@ -555,6 +556,11 @@ class WeatherBot:
 
     async def execute_trade(self, market: dict, confidence: float, event_type: str):
         if not self.is_trading: return
+
+        # Check Max Trades Limit
+        if len(self.open_positions) >= self.config.get("max_trades", 10):
+            return
+
         tokens = market.get("clobTokenIds", [])
         if isinstance(tokens, str):
             import json
@@ -562,10 +568,12 @@ class WeatherBot:
                 tokens = json.loads(tokens)
             except:
                 return
-        if not tokens: return
-        yes_token = tokens[0]
+        if not tokens or len(tokens) < 2: return
 
-        if yes_token in self.traded_tokens: return
+        yes_token = tokens[0]
+        no_token = tokens[1]
+
+        if yes_token in self.traded_tokens or no_token in self.traded_tokens: return
         # In live mode we care about volume, but in paper mode or tests we may allow lower volume
         if not self.config.get("paper_mode", True) and float(market.get("volume", 0)) < 500: return
 
@@ -573,41 +581,81 @@ class WeatherBot:
             thresh_info = self.parse_temp_threshold(market.get("question", ""))
             if thresh_info:
                 # Convert threshold to Celsius for comparison with NASA anomaly
-                thresh_c = thresh_info["value"]
-                if thresh_info["unit"] == "F":
-                    thresh_c = (thresh_info["value"] - 32) * 5/9
+                val = thresh_info.get("value") or thresh_info.get("min")
+                if val:
+                    thresh_c = val
+                    if thresh_info["unit"] == "F":
+                        thresh_c = (val - 32) * 5/9
 
-                # NASA anomaly is global, but we use it as a trend signal.
-                # If current global anomaly is high, we lean towards "Yes" for record heat.
-                if self.nasa_anomaly > 0.5:
-                    confidence = max(confidence, 0.85)
-                elif self.nasa_anomaly < -0.5:
-                    confidence = min(confidence, 0.15)
+                    if self.nasa_anomaly > 0.5:
+                        confidence = max(confidence, 0.85)
+                    elif self.nasa_anomaly < -0.5:
+                        confidence = min(confidence, 0.15)
 
-        vwap = await self.get_vwap_price(yes_token, "BUY", self.config["trade_amount"])
-        if not vwap: return
+        # Calculate Edge for YES
+        vwap_yes = await self.get_vwap_price(yes_token, "BUY", self.config["trade_amount"])
+        # Calculate Edge for NO (Price of NO is effectively 1 - Price of YES, but we get real book)
+        vwap_no = await self.get_vwap_price(no_token, "BUY", self.config["trade_amount"])
 
         taker_fee = 0.015
-        true_edge = confidence - vwap - taker_fee
-        self.add_log(f"[{market['question'][:50]}...] Conf: {confidence:.2f} | VWAP: {vwap:.2f} | Edge: {true_edge:+.2f}")
 
-        if true_edge >= self.config["min_edge"]:
-            self.add_log(f"🚨 EXECUTING BUY YES for ${self.config['trade_amount']}")
+        # Logic to decide between YES and NO
+        target_side = None
+        target_token = None
+        best_vwap = 0
+        best_edge = -1
+
+        # YES Edge
+        if vwap_yes:
+            edge_yes = confidence - vwap_yes - taker_fee
+            if edge_yes >= self.config["min_edge"]:
+                target_side = "YES"
+                target_token = yes_token
+                best_vwap = vwap_yes
+                best_edge = edge_yes
+
+        # NO Edge (Confidence of NO is 1 - confidence of YES)
+        if vwap_no:
+            conf_no = 1.0 - confidence
+            edge_no = conf_no - vwap_no - taker_fee
+            if edge_no >= self.config["min_edge"] and edge_no > best_edge:
+                target_side = "NO"
+                target_token = no_token
+                best_vwap = vwap_no
+                best_edge = edge_no
+
+        if target_side:
+            self.add_log(f"[{market['question'][:40]}...] Target: {target_side} | Conf: {confidence if target_side=='YES' else 1-confidence:.2f} | VWAP: {best_vwap:.2f} | Edge: {best_edge:+.2f}")
+            self.add_log(f"🚨 EXECUTING BUY {target_side} for ${self.config['trade_amount']}")
+
             if not self.config["paper_mode"]:
                 try:
-                    mo = MarketOrderArgs(token_id=yes_token, amount=self.config["trade_amount"], side=BUY, order_type=OrderType.FOK)
+                    from py_clob_client.order_builder.constants import BUY
+                    mo = MarketOrderArgs(token_id=target_token, amount=self.config["trade_amount"], side=BUY, order_type=OrderType.FOK)
                     signed = await asyncio.to_thread(self.clob_client.create_market_order, mo)
                     resp = await asyncio.to_thread(self.clob_client.post_order, signed, OrderType.FOK)
                     self.add_log(f"✅ Trade confirmed: {resp}")
-                    self.traded_tokens.add(yes_token)
-                    self.open_positions.append({"question": market["question"], "amount": self.config["trade_amount"], "price": vwap, "token_id": yes_token})
+                    self.traded_tokens.add(target_token)
+                    self.open_positions.append({
+                        "question": market["question"],
+                        "side": target_side,
+                        "amount": self.config["trade_amount"],
+                        "price": best_vwap,
+                        "token_id": target_token
+                    })
                 except Exception as e: self.add_log(f"❌ Trade failed: {e}", "ERROR")
             else:
-                self.add_log("✅ [PAPER MODE] Trade Simulated.")
-                self.traded_tokens.add(yes_token)
+                self.add_log(f"✅ [PAPER MODE] {target_side} Trade Simulated.")
+                self.traded_tokens.add(target_token)
                 self.metrics["total_trades"] += 1
                 self.metrics["balance"] -= self.config["trade_amount"]
-                self.open_positions.append({"question": market["question"], "amount": self.config["trade_amount"], "price": vwap, "token_id": yes_token})
+                self.open_positions.append({
+                    "question": market["question"],
+                    "side": target_side,
+                    "amount": self.config["trade_amount"],
+                    "price": best_vwap,
+                    "token_id": target_token
+                })
 
     async def sniper_task(self, event: WeatherEvent, combined_conf: float, snipe_key: str):
         if not self.is_trading: return
@@ -757,7 +805,7 @@ class WeatherBot:
                                 target_val = (forecast_max * 9/5) + 32
 
                             # Comparison
-                            edge_val = target_val - thresh.get("value", 0)
+                            edge_val = target_val - (thresh.get("value") or thresh.get("min") or 0)
                             if thresh["type"] == "exact":
                                 abs_diff = abs(target_val - thresh["value"])
                                 if abs_diff < 0.5: confidence = 0.85
@@ -771,6 +819,15 @@ class WeatherBot:
                                 if edge_val < -1.0: confidence = 0.92
                                 elif edge_val > 1.0: confidence = 0.08
                                 else: confidence = 0.5
+                            elif thresh["type"] == "range":
+                                if thresh["min"] <= target_val <= thresh["max"]:
+                                    confidence = 0.90
+                                else:
+                                    # If it's outside the range by a good margin, NO is the bet
+                                    if target_val < (thresh["min"] - 1.0) or target_val > (thresh["max"] + 1.0):
+                                        confidence = 0.10
+                                    else:
+                                        confidence = 0.5
 
                             self.add_log(f"  [DATA] {location} Temp Forecast: {target_val:.1f}{thresh['unit']} vs Market: {thresh['type']} {thresh.get('value') or thresh.get('min')}. Edge: {edge_val:+.1f}. Conf -> {confidence:.2f}")
 

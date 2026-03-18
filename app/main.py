@@ -16,7 +16,8 @@ bot_config = {
     "min_edge": 0.20,
     "scan_interval": 2,
     "paper_mode": True,
-    "paper_balance": 1000.0
+    "paper_balance": 1000.0,
+    "max_trades": 10
 }
 
 def create_app():

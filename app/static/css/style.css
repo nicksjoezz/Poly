@@ -236,6 +236,21 @@ header {
 
 .log-entry { margin-bottom: 4px; border-left: 2px solid var(--accent-blue); padding-left: 8px; }
 
+.side-badge {
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 700;
+}
+.side-badge.yes {
+    background: rgba(34, 197, 94, 0.2);
+    color: var(--success);
+}
+.side-badge.no {
+    background: rgba(239, 68, 68, 0.2);
+    color: var(--danger);
+}
+
 /* Forms */
 .form-group {
     margin-bottom: 15px;

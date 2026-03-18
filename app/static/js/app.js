@@ -74,6 +74,24 @@ document.addEventListener('DOMContentLoaded', () => {
         mProfit.innerText = '$' + data.metrics.total_profit.toFixed(2);
         mBalance.innerText = '$' + data.metrics.balance.toLocaleString();
 
+        // Update settings inputs with current values if not already focused
+        if (data.config) {
+            const inputs = {
+                's-mode': data.config.paper_mode.toString(),
+                's-amount': data.config.trade_amount,
+                's-edge': data.config.min_edge,
+                's-interval': data.config.scan_interval,
+                's-balance': data.config.paper_balance,
+                's-max-trades': data.config.max_trades
+            };
+            for (const [id, val] of Object.entries(inputs)) {
+                const el = document.getElementById(id);
+                if (el && document.activeElement !== el) {
+                    el.value = val;
+                }
+            }
+        }
+
         // Update Logs
         logDisplay.innerHTML = data.logs.map(log => `<div class="log-entry">${log}</div>`).join('');
         logDisplay.scrollTop = logDisplay.scrollHeight;
@@ -82,9 +100,9 @@ document.addEventListener('DOMContentLoaded', () => {
         positionsTable.innerHTML = data.open_positions.map(p => `
             <tr>
                 <td>${p.question.substring(0, 50)}...</td>
+                <td><span class="side-badge ${p.side.toLowerCase()}">${p.side}</span></td>
                 <td>$${p.amount}</td>
                 <td>${p.price.toFixed(3)}</td>
-                <td>-</td>
                 <td><span class="success">Live</span></td>
             </tr>
         `).join('');
@@ -120,6 +138,7 @@ document.addEventListener('DOMContentLoaded', () => {
             min_edge: parseFloat(document.getElementById('s-edge').value),
             scan_interval: parseInt(document.getElementById('s-interval').value),
             paper_balance: parseFloat(document.getElementById('s-balance').value),
+            max_trades: parseInt(document.getElementById('s-max-trades').value),
             private_key: document.getElementById('s-pk').value,
             wallet_address: document.getElementById('s-wallet').value
         };
