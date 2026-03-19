@@ -876,23 +876,36 @@ class WeatherBot:
                                 if thresh["unit"] == "F": target_val = (forecast_max * 9/5) + 32
 
                                 # Strict Quantitative Analysis:
-                                # 1. If diff < 1.0 -> High Confidence YES (0.95)
-                                # 2. Otherwise -> Strong NO (0.05)
+                                # 1. If diff <= 0.5 -> High Confidence YES (0.95)
+                                # 2. If diff >= 3.0 -> Strong NO (0.05)
+                                # 3. Otherwise -> SKIP (0.5)
 
-                                edge_val = target_val - (thresh.get("value") or thresh.get("min") or 0)
                                 if thresh["type"] == "exact":
                                     abs_diff = abs(target_val - thresh["value"])
-                                    if abs_diff < 1.0: confidence = 0.95
-                                    else: confidence = 0.05
+                                    if abs_diff <= 0.5: confidence = 0.95
+                                    elif abs_diff >= 3.0: confidence = 0.05
+                                    else: confidence = 0.5
                                 elif thresh["type"] == "at_least":
-                                    if edge_val >= 1.0: confidence = 0.95
-                                    else: confidence = 0.05
+                                    diff = target_val - thresh["value"]
+                                    if diff >= 3.0 or abs(diff) <= 0.5: confidence = 0.95
+                                    elif diff <= -3.0: confidence = 0.05
+                                    else: confidence = 0.5
                                 elif thresh["type"] == "less_than":
-                                    if edge_val <= -1.0: confidence = 0.95
-                                    else: confidence = 0.05
+                                    diff = thresh["value"] - target_val
+                                    if diff >= 3.0 or abs(diff) <= 0.5: confidence = 0.95
+                                    elif diff <= -3.0: confidence = 0.05
+                                    else: confidence = 0.5
                                 elif thresh["type"] == "range":
-                                    if thresh["min"] <= target_val <= thresh["max"]: confidence = 0.95
-                                    else: confidence = 0.05
+                                    if thresh["min"] <= target_val <= thresh["max"]:
+                                        dist_to_edge = min(abs(target_val - thresh["min"]), abs(target_val - thresh["max"]))
+                                        if dist_to_edge <= 0.5 or (target_val - thresh["min"] >= 3.0 and thresh["max"] - target_val >= 3.0):
+                                            confidence = 0.95
+                                        else:
+                                            confidence = 0.5
+                                    else:
+                                        dist_to_edge = min(abs(target_val - thresh["min"]), abs(target_val - thresh["max"]))
+                                        if dist_to_edge >= 3.0: confidence = 0.05
+                                        else: confidence = 0.5
 
                                 analysis_steps.append(f"Temperature forecast for {location}: {target_val:.1f}{thresh['unit']}. Market threshold: {thresh['type']} {thresh.get('value') or thresh.get('min')}. Adjusted confidence to {confidence:.2f}.")
                                 self.add_log(f"  [DATA] {location} Temp: {target_val:.1f}{thresh['unit']} vs Market: {thresh['type']} {thresh.get('value') or thresh.get('min')}. Conf -> {confidence:.2f}", "DEBUG")
@@ -1025,8 +1038,11 @@ class WeatherBot:
 
                                 # Tokens bought = amount / entry_price
                                 # Payout = tokens * final_price (usually 1.0 or 0.0)
-                                tokens = pos["amount"] / pos["price"]
-                                payout = tokens * final_price
+                                if pos["price"] > 0:
+                                    tokens = pos["amount"] / pos["price"]
+                                    payout = tokens * final_price
+                                else:
+                                    payout = 0
                                 profit = payout - pos["amount"]
 
                                 self.metrics["total_trades"] += 1
