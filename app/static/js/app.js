@@ -20,6 +20,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const resolvedTable = document.getElementById('resolved-table');
     const scanTable = document.getElementById('scan-table');
     const newsTable = document.getElementById('news-table');
+    const devTable = document.getElementById('dev-table');
+    const downloadLogsBtn = document.getElementById('download-logs-btn');
 
     // Tab Logic
     const tabs = document.querySelectorAll('.tab-btn');
@@ -165,7 +167,61 @@ document.addEventListener('DOMContentLoaded', () => {
                 <td style="font-size: 0.75rem">${e.desc}</td>
             </tr>
         `).join('');
+
+        // Update Dev Check Logs
+        if (devTable && data.dev_check_logs) {
+            devTable.innerHTML = data.dev_check_logs.map(log => {
+                const newsItems = log.triggering_news.map(n => `<div style="margin-bottom: 5px; border-left: 2px solid var(--primary); padding-left: 5px;">[${n.source}] ${n.location}: ${n.desc} (${(n.confidence * 100).toFixed(0)}%)</div>`).join('');
+                return `
+                    <tr>
+                        <td style="font-size: 0.7rem; white-space: nowrap;">${log.timestamp}</td>
+                        <td style="font-size: 0.8rem;"><span class="side-badge ${log.target_side.toLowerCase()}">${log.target_side}</span> ${log.market.question.substring(0, 40)}...</td>
+                        <td style="font-size: 0.8rem; color: var(--primary-light);">${log.analysis || 'N/A'}</td>
+                        <td style="font-size: 0.7rem;">${newsItems || 'No matching news triggered'}</td>
+                        <td style="font-size: 0.7rem; color: var(--text-dim);">
+                            Conf: ${(log.confidence * 100).toFixed(1)}% |
+                            Price: ${log.vwap.toFixed(3)} |
+                            Edge: ${log.edge.toFixed(3)}
+                        </td>
+                    </tr>
+                `;
+            }).reverse().join('');
+        }
     });
+
+    // Download Logs Logic
+    if (downloadLogsBtn) {
+        downloadLogsBtn.addEventListener('click', () => {
+            fetch('/api/control', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'status' }) })
+            .then(res => res.json())
+            .then(() => {
+                // We use socket data for logs to ensure they are up to date
+                const logs = lastStatusJson ? JSON.parse(lastStatusJson).dev_check_logs : [];
+                if (logs.length === 0) {
+                    alert('No logs available to download yet.');
+                    return;
+                }
+
+                const logText = logs.map(l => {
+                    return `[${l.timestamp}] TRADE: ${l.target_side} | MARKET: ${l.market.question}\n` +
+                           `ANALYSIS: ${l.analysis}\n` +
+                           `TRIGGERING NEWS: ${l.triggering_news.map(n => `(${n.source}) ${n.desc}`).join('; ')}\n` +
+                           `STATS: Confidence: ${l.confidence}, Price: ${l.vwap}, Edge: ${l.edge}\n` +
+                           `--------------------------------------------------------------------------------\n`;
+                }).join('\n');
+
+                const blob = new Blob([logText], { type: 'text/plain' });
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `weather_bot_analysis_${new Date().toISOString().slice(0, 10)}.log`;
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+            });
+        });
+    }
 
     // Settings Form
     const settingsForm = document.getElementById('settings-form');

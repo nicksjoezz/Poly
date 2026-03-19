@@ -207,6 +207,7 @@ class WeatherBot:
         self.news_events = []
         self.open_positions = []
         self.resolved_positions = []
+        self.dev_check_logs = []
         self.metrics = {
             "total_trades": 0,
             "win_rate": 0.0,
@@ -475,7 +476,7 @@ class WeatherBot:
             return {"type": "range", "min": v1, "max": v2, "unit": unit}
 
         # Handle "100 or more", "at least 100", "100 or higher"
-        at_least_match = re.search(r"(\d+(?:\.\d+)?)\s*or more|at least\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*or higher", title, re.IGNORECASE)
+        at_least_match = re.search(r"(\d+(?:\.\d+)?)\s*°?[FC]?\s*or more|at least\s*(\d+(?:\.\d+)?)\s*°?[FC]?|(\d+(?:\.\d+)?)\s*°?[FC]?\s*or higher", title, re.IGNORECASE)
         if at_least_match:
             val = float(at_least_match.group(1) or at_least_match.group(2) or at_least_match.group(3))
             unit = "C"
@@ -483,7 +484,7 @@ class WeatherBot:
             return {"type": "at_least", "value": val, "unit": unit}
 
         # Handle "less than 60", "60 or below"
-        less_than_match = re.search(r"less than\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*or below", title, re.IGNORECASE)
+        less_than_match = re.search(r"less than\s*(\d+(?:\.\d+)?)\s*°?[FC]?|(\d+(?:\.\d+)?)\s*°?[FC]?\s*or below", title, re.IGNORECASE)
         if less_than_match:
             val = float(less_than_match.group(1) or less_than_match.group(2))
             unit = "C"
@@ -583,7 +584,7 @@ class WeatherBot:
             log.debug(f"Error fetching VWAP for {token_id}: {e}")
             return None
 
-    async def execute_trade(self, market: dict, confidence: float, event_type: str):
+    async def execute_trade(self, market: dict, confidence: float, event_type: str, analysis: str = "", triggering_news: list = None):
         if not self.is_trading:
             self.add_log(f"Opportunity found for {market.get('id')} but trading is DISABLED. Enable 'Start Trading' to execute.", "DEBUG")
             return
@@ -693,6 +694,29 @@ class WeatherBot:
             self.add_log(f"Stats: Conf={confidence if target_side=='YES' else 1-confidence:.2f}, VWAP={best_vwap:.2f}, Edge={best_edge:+.2f}")
             self.add_log(f"🚨 EXECUTING BUY {target_side} for ${self.config['trade_amount']}")
 
+            trade_info = {
+                "market_id": market.get("id"),
+                "question": market["question"],
+                "side": target_side,
+                "amount": self.config["trade_amount"],
+                "price": best_vwap,
+                "token_id": target_token,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+
+            # Add to Dev Check Logs
+            self.dev_check_logs.append({
+                "market": market,
+                "confidence": confidence,
+                "target_side": target_side,
+                "vwap": best_vwap,
+                "edge": best_edge,
+                "analysis": analysis,
+                "triggering_news": triggering_news or [],
+                "timestamp": trade_info["timestamp"]
+            })
+            if len(self.dev_check_logs) > 50: self.dev_check_logs.pop(0)
+
             if not self.config["paper_mode"]:
                 try:
                     from py_clob_client.order_builder.constants import BUY
@@ -701,29 +725,13 @@ class WeatherBot:
                     resp = await asyncio.to_thread(self.clob_client.post_order, signed, OrderType.FOK)
                     self.add_log(f"✅ Trade confirmed: {resp}")
                     self.traded_tokens.add(target_token)
-                    self.open_positions.append({
-                        "market_id": market.get("id"),
-                        "question": market["question"],
-                        "side": target_side,
-                        "amount": self.config["trade_amount"],
-                        "price": best_vwap,
-                        "token_id": target_token,
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    })
+                    self.open_positions.append(trade_info)
                 except Exception as e: self.add_log(f"❌ Trade failed: {e}", "ERROR")
             else:
                 self.add_log(f"✅ [PAPER MODE] {target_side} Trade Simulated.")
                 self.traded_tokens.add(target_token)
                 self.metrics["balance"] -= self.config["trade_amount"]
-                self.open_positions.append({
-                    "market_id": market.get("id"),
-                    "question": market["question"],
-                    "side": target_side,
-                    "amount": self.config["trade_amount"],
-                    "price": best_vwap,
-                    "token_id": target_token,
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                })
+                self.open_positions.append(trade_info)
 
     async def sniper_task(self, event: WeatherEvent, combined_conf: float, snipe_key: str):
         if not self.is_trading: return
@@ -752,7 +760,9 @@ class WeatherBot:
                                 self.add_log(f"🚨 [SNIPER HIT] Market deployed on attempt {attempt} for {event.location}!")
                                 for m in matched:
                                     self.add_log(f"Sniper Matched: {m.get('question')}")
-                                    await self.execute_trade(m, combined_conf, event.event_type)
+                                    await self.execute_trade(m, combined_conf, event.event_type,
+                                                           analysis=f"Sniper triggered for {event.location} based on {event.source} alert.",
+                                                           triggering_news=[event.__dict__])
                                 return
                     await asyncio.sleep(30)
             self.add_log(f"🛑 [SNIPER EXPIRED] No market created for {event.location}.")
@@ -842,6 +852,8 @@ class WeatherBot:
             local_forecast_cache = {}
 
             for m in cached_markets:
+                analysis_steps = []
+                triggering_news_objs = []
                 title = m.get("question", "")
                 full_text = (title + " " + m.get("description", "")).lower()
 
@@ -873,6 +885,8 @@ class WeatherBot:
                 if matching_alerts:
                     best_alert = max(matching_alerts, key=lambda a: a.confidence)
                     confidence = max(confidence, best_alert.confidence)
+                    triggering_news_objs = [a.__dict__ for a in matching_alerts]
+                    analysis_steps.append(f"Found {len(matching_alerts)} matching news alerts. Best alert from {best_alert.source} with confidence {best_alert.confidence:.2f}.")
                     self.add_log(f"  [NEWS] Found matching {best_alert.source} alert for {location}. Confidence -> {confidence:.2f}")
 
                 # B. Temperature and Precipitation Logic (with Local Caching)
@@ -906,6 +920,7 @@ class WeatherBot:
                                     if thresh["min"] <= target_val <= thresh["max"]: confidence = 0.90
                                     elif target_val < (thresh["min"] - 1.0) or target_val > (thresh["max"] + 1.0): confidence = 0.10
 
+                                analysis_steps.append(f"Temperature forecast for {location}: {target_val:.1f}{thresh['unit']}. Market threshold: {thresh['type']} {thresh.get('value') or thresh.get('min')}. Adjusted confidence to {confidence:.2f}.")
                                 self.add_log(f"  [DATA] {location} Temp: {target_val:.1f}{thresh['unit']} vs Market: {thresh['type']} {thresh.get('value') or thresh.get('min')}. Conf -> {confidence:.2f}", "DEBUG")
 
                     elif etype == "rain":
@@ -919,9 +934,11 @@ class WeatherBot:
                             # but for probability, we bet NO if prob is very low
                             if prob < 0.10: confidence = 0.05
                             elif prob > 0.90: confidence = 0.95
+                            analysis_steps.append(f"Precipitation probability for {location}: {prob:.2f}. Adjusted confidence to {confidence:.2f}.")
 
                 # C. Hottest Year Rankings (Mutual Exclusion Logic)
                 if "hottest year" in title.lower() and self.nasa_anomaly is not None:
+                    prev_conf = confidence
                     if self.nasa_anomaly > 1.15: # Extreme anomaly, almost certainly #1
                         if any(kw in title.lower() for kw in ["hottest", "first", "1st"]): confidence = 0.98
                         else: confidence = 0.02 # All other ranks are NO
@@ -933,12 +950,14 @@ class WeatherBot:
                     elif self.nasa_anomaly < 0.5: # Cool year relative to trend
                         if "lower" in title.lower() or "6th" in title.lower(): confidence = 0.80
                         else: confidence = 0.20
+                    analysis_steps.append(f"NASA Global Anomaly: {self.nasa_anomaly}°C. Mutual Exclusion adjustment for ranking: {prev_conf:.2f} -> {confidence:.2f}.")
                     self.add_log(f"  [NASA] Global Anomaly: {self.nasa_anomaly}°C. Mutual Exclusion adjustment for ranking.")
 
                 # D. Arctic Sea Ice
                 if "arctic sea ice" in title.lower() and self.nasa_anomaly is not None:
                     if self.nasa_anomaly > 1.0 and any(kw in title.lower() for kw in ["min", "minimum", "lowest"]):
                         confidence = 0.88
+                        analysis_steps.append(f"Arctic Sea Ice analysis: High NASA anomaly ({self.nasa_anomaly}) suggests record low. Confidence -> {confidence:.2f}.")
 
                 # E. Earthquake Logic (Mutual Exclusion)
                 if any(kw in title.lower() for kw in ["earthquake", "megaquake"]):
@@ -958,6 +977,7 @@ class WeatherBot:
                     current_count = await self.fetch_earthquake_count(session, mag_val, start_bound, end_bound)
                     self.add_log(f"  [DATA] Global {mag_val}+ Earthquake count ({start_bound} to {end_bound}): {current_count}")
 
+                    prev_conf = confidence
                     if exactly_match:
                         target_n = int(exactly_match.group(1))
                         if current_count > target_n: confidence = 0.01 # Impossible
@@ -966,10 +986,13 @@ class WeatherBot:
                     elif more_than_match:
                         target_n = int(more_than_match.group(1))
                         if current_count > target_n: confidence = 0.99 # Already happened
+                    analysis_steps.append(f"Earthquake analysis: Global {mag_val}+ count is {current_count}. Adjusted confidence: {prev_conf:.2f} -> {confidence:.2f}.")
 
                 # 4. Final Trade Execution
                 if confidence != 0.5:
-                    await self.execute_trade(m, confidence, etype)
+                    await self.execute_trade(m, confidence, etype,
+                                           analysis=" | ".join(analysis_steps),
+                                           triggering_news=triggering_news_objs)
 
             self.add_log(f"Pipeline Scan Finished. Summary: {len(all_alerts)} alerts, {len(cached_markets)} markets analyzed.")
 
@@ -1126,6 +1149,7 @@ class WeatherBot:
             "scanned_markets": self.scanned_markets[:50],
             "total_scanned": len(self.scanned_markets),
             "news_events": self.news_events[:20],
+            "dev_check_logs": self.dev_check_logs[-50:],
             "logs": self.logs[-20:],
             "config": {k: v for k, v in self.config.items() if "key" not in k} # Don't send keys to UI
         }
