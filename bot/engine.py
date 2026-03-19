@@ -462,52 +462,56 @@ class WeatherBot:
         await asyncio.gather(*tasks)
         return list(all_markets.values())
 
-    def parse_temp_threshold(self, title: str) -> dict | None:
-        """Parses value and unit from title, e.g., '80°F' or '30°C'."""
-        # Handle ranges like "between 60 and 70" or "80-81"
-        range_match = re.search(r"between (\d+(?:\.\d+)?)\s*(?:and|to|&)\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)", title, re.IGNORECASE)
+    def parse_numeric_threshold(self, title: str) -> dict | None:
+        """Parses value, comparison type, and unit from title for temp or precip."""
+        title_lower = title.lower()
+
+        # 1. Identify Unit
+        unit = "C" # Default
+        if any(x in title_lower for x in ["°f", "fahrenheit"]): unit = "F"
+        elif "inch" in title_lower: unit = "inch"
+        elif "mm" in title_lower or "millimeter" in title_lower: unit = "mm"
+
+        # 2. Match Ranges
+        # "between 60 and 70", "80-81", "5 to 6 inches"
+        range_match = re.search(r"between\s+(\d+(?:\.\d+)?)\s*(?:and|to|&)\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s+to\s+(\d+(?:\.\d+)?)\s+(?:inch|mm|degrees|°)", title_lower)
         if range_match:
-            if range_match.group(1):
-                v1, v2 = float(range_match.group(1)), float(range_match.group(2))
-            else:
-                v1, v2 = float(range_match.group(3)), float(range_match.group(4))
-            unit = "C" # Default for Polymarket usually
-            if "°f" in title.lower() or "fahrenheit" in title.lower(): unit = "F"
-            return {"type": "range", "min": v1, "max": v2, "unit": unit}
+            v1, v2 = None, None
+            if range_match.group(1): v1, v2 = float(range_match.group(1)), float(range_match.group(2))
+            elif range_match.group(3): v1, v2 = float(range_match.group(3)), float(range_match.group(4))
+            elif range_match.group(5): v1, v2 = float(range_match.group(5)), float(range_match.group(6))
+            if v1 is not None:
+                return {"type": "range", "min": min(v1, v2), "max": max(v1, v2), "unit": unit}
 
-        # Handle "100 or more", "at least 100", "100 or higher"
-        at_least_match = re.search(r"(\d+(?:\.\d+)?)\s*°?[FC]?\s*or more|at least\s*(\d+(?:\.\d+)?)\s*°?[FC]?|(\d+(?:\.\d+)?)\s*°?[FC]?\s*or higher", title, re.IGNORECASE)
-        if at_least_match:
-            val = float(at_least_match.group(1) or at_least_match.group(2) or at_least_match.group(3))
-            unit = "C"
-            if "°f" in title.lower() or "fahrenheit" in title.lower(): unit = "F"
-            return {"type": "at_least", "value": val, "unit": unit}
+        # 3. Match "At Least" / "Or Higher" / "Or More"
+        at_least_patterns = [
+            r"(\d+(?:\.\d+)?)\s*(?:°?[fc]|inch|mm|inches|millimeters)?\s*or\s*(?:more|higher|above)",
+            r"(?:at\s+least|above|more\s+than|greater\s+than)\s*(\d+(?:\.\d+)?)",
+        ]
+        for p in at_least_patterns:
+            m = re.search(p, title_lower)
+            if m:
+                return {"type": "at_least", "value": float(m.group(1)), "unit": unit}
 
-        # Handle "less than 60", "60 or below"
-        less_than_match = re.search(r"less than\s*(\d+(?:\.\d+)?)\s*°?[FC]?|(\d+(?:\.\d+)?)\s*°?[FC]?\s*or below", title, re.IGNORECASE)
-        if less_than_match:
-            val = float(less_than_match.group(1) or less_than_match.group(2))
-            unit = "C"
-            if "°f" in title.lower() or "fahrenheit" in title.lower(): unit = "F"
-            return {"type": "less_than", "value": val, "unit": unit}
+        # 4. Match "Less Than" / "Or Below" / "Or Fewer"
+        less_than_patterns = [
+            r"(\d+(?:\.\d+)?)\s*(?:°?[fc]|inch|mm|inches|millimeters)?\s*or\s*(?:below|lower|fewer|less)",
+            r"(?:less\s+than|fewer\s+than|below|under)\s*(\d+(?:\.\d+)?)",
+        ]
+        for p in less_than_patterns:
+            m = re.search(p, title_lower)
+            if m:
+                return {"type": "less_than", "value": float(m.group(1)), "unit": unit}
 
-        # Match Fahrenheit simple
-        f_match = re.search(r"(\d+(?:\.\d+)?)\s*°?F", title, re.IGNORECASE)
-        if f_match:
-            return {"type": "exact", "value": float(f_match.group(1)), "unit": "F"}
+        # 5. Match Exact Values
+        exact_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:°[fc]|°|degrees|inch|mm|inches|millimeters|c|f)\b", title_lower)
+        if exact_match:
+            return {"type": "exact", "value": float(exact_match.group(1)), "unit": unit}
 
-        # Match Celsius simple
-        c_match = re.search(r"(\d+(?:\.\d+)?)\s*°?C", title, re.IGNORECASE)
-        if c_match:
-            return {"type": "exact", "value": float(c_match.group(1)), "unit": "C"}
-
-        # Match plain number if 'degrees' is mentioned
-        if "degrees" in title.lower():
-            n_match = re.search(r"(\d+(?:\.\d+)?)", title)
-            if n_match:
-                val = float(n_match.group(1))
-                unit = "F" if val > 45 else "C"
-                return {"type": "exact", "value": val, "unit": unit}
+        # Last ditch: any number near a unit
+        if unit != "C" or "degrees" in title_lower:
+            m = re.search(r"(\d+(?:\.\d+)?)", title_lower)
+            if m: return {"type": "exact", "value": float(m.group(1)), "unit": unit}
 
         return None
 
@@ -618,76 +622,38 @@ class WeatherBot:
             self.add_log(f"Low volume ({volume}) for market {market.get('id')}, skipping.", "DEBUG")
             return
 
-        if event_type == "temperature" and self.nasa_anomaly is not None:
-            thresh_info = self.parse_temp_threshold(market.get("question", ""))
-            if thresh_info:
-                # Convert threshold to Celsius for comparison with NASA anomaly
-                val = thresh_info.get("value") or thresh_info.get("min")
-                if val:
-                    thresh_c = val
-                    if thresh_info["unit"] == "F":
-                        thresh_c = (val - 32) * 5/9
-
-                    if self.nasa_anomaly > 0.5:
-                        confidence = max(confidence, 0.85)
-                    elif self.nasa_anomaly < -0.5:
-                        confidence = min(confidence, 0.15)
-
-        # Calculate Edge for YES and NO
-        vwap_yes, vwap_no = await asyncio.gather(
-            self.get_vwap_price(yes_token, "BUY", self.config["trade_amount"]),
-            self.get_vwap_price(no_token, "BUY", self.config["trade_amount"])
-        )
-
-        # Fallback to AMM prices from Gamma API if CLOB is missing or illiquid
-        amm_prices = market.get("outcomePrices")
-        if isinstance(amm_prices, str):
-            try: amm_prices = json.loads(amm_prices)
-            except: amm_prices = None
-
-        if amm_prices and len(amm_prices) >= 2:
-            if vwap_yes is None: vwap_yes = float(amm_prices[0])
-            if vwap_no is None: vwap_no = float(amm_prices[1])
-
-        taker_fee = 0.015
-        target_side = None
-
-        if not vwap_yes and not vwap_no:
-            log.debug(f"No orderbook found for either YES or NO tokens in market {market.get('id')}")
+        # Directional Filter: Prevent betting on unlikely outcomes just because they're "cheap"
+        # If confidence is neutral (0.5), we skip.
+        if confidence == 0.5:
             return
 
-        target_token = None
-        best_vwap = 0
-        best_edge = -1
+        # Calculate Edge for the target side ONLY
+        taker_fee = 0.015
+        target_side = "YES" if confidence > 0.5 else "NO"
+        target_token = yes_token if target_side == "YES" else no_token
+        target_conf = confidence if target_side == "YES" else 1.0 - confidence
 
-        # YES Edge
-        if vwap_yes:
-            edge_yes = confidence - vwap_yes - taker_fee
-            log.debug(f"Market {market.get('id')} YES Edge: {edge_yes:.4f} (Conf: {confidence:.2f}, VWAP: {vwap_yes:.4f})")
-            if edge_yes >= self.config["min_edge"]:
-                target_side = "YES"
-                target_token = yes_token
-                best_vwap = vwap_yes
-                best_edge = edge_yes
-            else:
-                self.add_log(f"Low edge for YES in {market.get('id')}: {edge_yes:.2f} (Need {self.config['min_edge']:.2f})")
-        else:
-            self.add_log(f"No orderbook/price for YES token {yes_token}", "DEBUG")
+        # Fetch Price
+        vwap = await self.get_vwap_price(target_token, "BUY", self.config["trade_amount"])
+        if vwap is None:
+            amm_prices = market.get("outcomePrices")
+            if isinstance(amm_prices, str):
+                try: amm_prices = json.loads(amm_prices)
+                except: amm_prices = None
+            if amm_prices and len(amm_prices) >= 2:
+                vwap = float(amm_prices[0 if target_side == "YES" else 1])
 
-        # NO Edge
-        if vwap_no:
-            conf_no = 1.0 - confidence
-            edge_no = conf_no - vwap_no - taker_fee
-            log.debug(f"Market {market.get('id')} NO Edge: {edge_no:.4f} (Conf: {conf_no:.2f}, VWAP: {vwap_no:.4f})")
-            if edge_no >= self.config["min_edge"] and edge_no > best_edge:
-                target_side = "NO"
-                target_token = no_token
-                best_vwap = vwap_no
-                best_edge = edge_no
-            elif edge_no < self.config["min_edge"]:
-                self.add_log(f"Low edge for NO in {market.get('id')}: {edge_no:.2f} (Need {self.config['min_edge']:.2f})", "DEBUG")
-        else:
-            self.add_log(f"No orderbook/price for NO token {no_token}", "DEBUG")
+        if vwap is None:
+            self.add_log(f"No price found for {target_side} token in {market.get('id')}", "DEBUG")
+            return
+
+        edge = target_conf - vwap - taker_fee
+        best_vwap = vwap
+        best_edge = edge
+
+        if edge < self.config["min_edge"]:
+            self.add_log(f"Low edge for {target_side} in {market.get('id')}: {edge:.2f} (Need {self.config['min_edge']:.2f})", "DEBUG")
+            return
 
         if target_side:
             self.add_log(f"Opportunity Found: {target_side} for '{market['question'][:50]}...'")
@@ -892,9 +858,14 @@ class WeatherBot:
                 # B. Temperature and Precipitation Logic (with Local Caching)
                 if etype in ["temperature", "rain"] and city_data:
                     cache_key = f"{location}_{date_str}_{etype}"
+                    thresh = self.parse_numeric_threshold(title)
+
+                    # Enforce Quantity Check: If market mentions a value/range but we couldn't parse it, skip.
+                    if any(kw in title.lower() for kw in ["inch", "mm", "°", "degree", "at least", "less than"]) and not thresh:
+                        self.add_log(f"  [SKIP] {m.get('id')} mentions quantity but parsing failed.")
+                        continue
 
                     if etype == "temperature":
-                        thresh = self.parse_temp_threshold(title)
                         if thresh:
                             if cache_key not in local_forecast_cache:
                                 local_forecast_cache[cache_key] = await self.get_forecast_max_temp(session, city_data[0], city_data[1], date_str)
@@ -904,37 +875,59 @@ class WeatherBot:
                                 target_val = forecast_max
                                 if thresh["unit"] == "F": target_val = (forecast_max * 9/5) + 32
 
-                                # Comparison with Edge for NO betting
+                                # Strict Quantitative Analysis:
+                                # 1. If diff < 1.0 -> High Confidence YES (0.95)
+                                # 2. If diff >= 3.0 -> High Confidence NO (0.05)
+                                # 3. Otherwise -> Neutral (0.5), we skip.
+
                                 edge_val = target_val - (thresh.get("value") or thresh.get("min") or 0)
                                 if thresh["type"] == "exact":
                                     abs_diff = abs(target_val - thresh["value"])
-                                    if abs_diff < 0.5: confidence = 0.85
-                                    elif abs_diff > 1.5: confidence = 0.15
+                                    if abs_diff < 1.0: confidence = 0.95
+                                    elif abs_diff >= 3.0: confidence = 0.05
+                                    else: confidence = 0.5
                                 elif thresh["type"] == "at_least":
-                                    if edge_val > 1.0: confidence = 0.92
-                                    elif edge_val < -1.0: confidence = 0.08
+                                    if edge_val >= 1.0: confidence = 0.95
+                                    elif edge_val <= -3.0: confidence = 0.05
+                                    else: confidence = 0.5
                                 elif thresh["type"] == "less_than":
-                                    if edge_val < -1.0: confidence = 0.92
-                                    elif edge_val > 1.0: confidence = 0.08
+                                    if edge_val <= -1.0: confidence = 0.95
+                                    elif edge_val >= 3.0: confidence = 0.05
+                                    else: confidence = 0.5
                                 elif thresh["type"] == "range":
-                                    if thresh["min"] <= target_val <= thresh["max"]: confidence = 0.90
-                                    elif target_val < (thresh["min"] - 1.0) or target_val > (thresh["max"] + 1.0): confidence = 0.10
+                                    if thresh["min"] <= target_val <= thresh["max"]: confidence = 0.95
+                                    elif target_val < (thresh["min"] - 3.0) or target_val > (thresh["max"] + 3.0): confidence = 0.05
+                                    else: confidence = 0.5
 
                                 analysis_steps.append(f"Temperature forecast for {location}: {target_val:.1f}{thresh['unit']}. Market threshold: {thresh['type']} {thresh.get('value') or thresh.get('min')}. Adjusted confidence to {confidence:.2f}.")
                                 self.add_log(f"  [DATA] {location} Temp: {target_val:.1f}{thresh['unit']} vs Market: {thresh['type']} {thresh.get('value') or thresh.get('min')}. Conf -> {confidence:.2f}", "DEBUG")
 
                     elif etype == "rain":
-                        if cache_key not in local_forecast_cache:
-                            local_forecast_cache[cache_key] = await self.get_openmeteo_forecast(session, city_data[0], city_data[1], date_str)
+                        if thresh:
+                            if cache_key not in local_forecast_cache:
+                                local_forecast_cache[cache_key] = await self.get_forecast_precipitation(session, city_data[0], city_data[1], date_str)
 
-                        prob = local_forecast_cache[cache_key]
-                        if prob is not None:
-                            confidence = prob
-                            # For ranges like 190-200mm, we need more advanced sum logic,
-                            # but for probability, we bet NO if prob is very low
-                            if prob < 0.10: confidence = 0.05
-                            elif prob > 0.90: confidence = 0.95
-                            analysis_steps.append(f"Precipitation probability for {location}: {prob:.2f}. Adjusted confidence to {confidence:.2f}.")
+                            forecast_sum = local_forecast_cache[cache_key]
+                            if forecast_sum is not None:
+                                target_val = forecast_sum
+                                # Simple unit conversion if needed (Open-Meteo returns mm by default)
+                                if thresh["unit"] == "inch": target_val = forecast_sum / 25.4
+
+                                edge_val = target_val - (thresh.get("value") or thresh.get("min") or 0)
+                                if thresh["type"] == "at_least":
+                                    if edge_val >= 0.5: confidence = 0.95
+                                    elif edge_val <= -0.5: confidence = 0.05
+                                    else: confidence = 0.5
+                                elif thresh["type"] == "less_than":
+                                    if edge_val <= -0.5: confidence = 0.95
+                                    elif edge_val >= 0.5: confidence = 0.05
+                                    else: confidence = 0.5
+                                elif thresh["type"] == "range":
+                                    if thresh["min"] <= target_val <= thresh["max"]: confidence = 0.95
+                                    elif target_val < (thresh["min"] - 0.5) or target_val > (thresh["max"] + 0.5): confidence = 0.05
+                                    else: confidence = 0.5
+
+                                analysis_steps.append(f"Precipitation forecast for {location}: {target_val:.2f}{thresh['unit']}. Market threshold: {thresh['type']} {thresh.get('value') or thresh.get('min')}. Adjusted confidence to {confidence:.2f}.")
 
                 # C. Hottest Year Rankings (Mutual Exclusion Logic)
                 if "hottest year" in title.lower() and self.nasa_anomaly is not None:
@@ -980,13 +973,25 @@ class WeatherBot:
                     prev_conf = confidence
                     if exactly_match:
                         target_n = int(exactly_match.group(1))
-                        if current_count > target_n: confidence = 0.01 # Impossible
-                        elif current_count == target_n: confidence = 0.75 # Current winner
-                        elif current_count < target_n - 2: confidence = 0.10 # Unlikely to reach
+                        if current_count > target_n:
+                            confidence = 0.01 # Impossible
+                        elif current_count == target_n:
+                            # If we hit the exact count, we only bet YES if there's very little time left
+                            days_left = (datetime.strptime(end_bound, "%Y-%m-%d") - datetime.now()).days
+                            if days_left <= 1: confidence = 0.85
+                            else: confidence = 0.5 # Still time for more, so risky
+                        else:
+                            # If count < target, we bet NO if it's unlikely to catch up
+                            days_left = (datetime.strptime(end_bound, "%Y-%m-%d") - datetime.now()).days
+                            needed = target_n - current_count
+                            if days_left < 2 and needed > 1: confidence = 0.01 # Very unlikely NO
+                            elif needed > 3: confidence = 0.05 # Strong NO
+                            else: confidence = 0.5 # Skip/Neutral
                     elif more_than_match:
                         target_n = int(more_than_match.group(1))
                         if current_count > target_n: confidence = 0.99 # Already happened
-                    analysis_steps.append(f"Earthquake analysis: Global {mag_val}+ count is {current_count}. Adjusted confidence: {prev_conf:.2f} -> {confidence:.2f}.")
+
+                    analysis_steps.append(f"Earthquake analysis: Global {mag_val}+ count is {current_count}. Target: {target_n if exactly_match else 'More than ' + str(target_n)}. Adjusted confidence: {prev_conf:.2f} -> {confidence:.2f}.")
 
                 # 4. Final Trade Execution
                 if confidence != 0.5:
