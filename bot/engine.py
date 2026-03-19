@@ -877,27 +877,22 @@ class WeatherBot:
 
                                 # Strict Quantitative Analysis:
                                 # 1. If diff < 1.0 -> High Confidence YES (0.95)
-                                # 2. If diff >= 3.0 -> High Confidence NO (0.05)
-                                # 3. Otherwise -> Neutral (0.5), we skip.
+                                # 2. Otherwise -> Strong NO (0.05)
 
                                 edge_val = target_val - (thresh.get("value") or thresh.get("min") or 0)
                                 if thresh["type"] == "exact":
                                     abs_diff = abs(target_val - thresh["value"])
                                     if abs_diff < 1.0: confidence = 0.95
-                                    elif abs_diff >= 3.0: confidence = 0.05
-                                    else: confidence = 0.5
+                                    else: confidence = 0.05
                                 elif thresh["type"] == "at_least":
                                     if edge_val >= 1.0: confidence = 0.95
-                                    elif edge_val <= -3.0: confidence = 0.05
-                                    else: confidence = 0.5
+                                    else: confidence = 0.05
                                 elif thresh["type"] == "less_than":
                                     if edge_val <= -1.0: confidence = 0.95
-                                    elif edge_val >= 3.0: confidence = 0.05
-                                    else: confidence = 0.5
+                                    else: confidence = 0.05
                                 elif thresh["type"] == "range":
                                     if thresh["min"] <= target_val <= thresh["max"]: confidence = 0.95
-                                    elif target_val < (thresh["min"] - 3.0) or target_val > (thresh["max"] + 3.0): confidence = 0.05
-                                    else: confidence = 0.5
+                                    else: confidence = 0.05
 
                                 analysis_steps.append(f"Temperature forecast for {location}: {target_val:.1f}{thresh['unit']}. Market threshold: {thresh['type']} {thresh.get('value') or thresh.get('min')}. Adjusted confidence to {confidence:.2f}.")
                                 self.add_log(f"  [DATA] {location} Temp: {target_val:.1f}{thresh['unit']} vs Market: {thresh['type']} {thresh.get('value') or thresh.get('min')}. Conf -> {confidence:.2f}", "DEBUG")
@@ -916,16 +911,13 @@ class WeatherBot:
                                 edge_val = target_val - (thresh.get("value") or thresh.get("min") or 0)
                                 if thresh["type"] == "at_least":
                                     if edge_val >= 0.5: confidence = 0.95
-                                    elif edge_val <= -0.5: confidence = 0.05
-                                    else: confidence = 0.5
+                                    else: confidence = 0.05
                                 elif thresh["type"] == "less_than":
                                     if edge_val <= -0.5: confidence = 0.95
-                                    elif edge_val >= 0.5: confidence = 0.05
-                                    else: confidence = 0.5
+                                    else: confidence = 0.05
                                 elif thresh["type"] == "range":
                                     if thresh["min"] <= target_val <= thresh["max"]: confidence = 0.95
-                                    elif target_val < (thresh["min"] - 0.5) or target_val > (thresh["max"] + 0.5): confidence = 0.05
-                                    else: confidence = 0.5
+                                    else: confidence = 0.05
 
                                 analysis_steps.append(f"Precipitation forecast for {location}: {target_val:.2f}{thresh['unit']}. Market threshold: {thresh['type']} {thresh.get('value') or thresh.get('min')}. Adjusted confidence to {confidence:.2f}.")
 
