@@ -986,15 +986,16 @@ class WeatherBot:
                             if days_left <= 1: confidence = 0.85
                             else: confidence = 0.5 # Still time for more, so risky
                         else:
-                            # If count < target, we bet NO if it's unlikely to catch up
-                            days_left = (datetime.strptime(end_bound, "%Y-%m-%d") - datetime.now()).days
-                            needed = target_n - current_count
-                            if days_left < 2 and needed > 1: confidence = 0.01 # Very unlikely NO
-                            elif needed > 3: confidence = 0.05 # Strong NO
-                            else: confidence = 0.5 # Skip/Neutral
+                            # If count < target, the user says "If the count is 0 then NO"
+                            # We'll bet Strong NO (0.05) if we haven't reached the target yet.
+                            confidence = 0.05
                     elif more_than_match:
                         target_n = int(more_than_match.group(1))
-                        if current_count > target_n: confidence = 0.99 # Already happened
+                        if current_count > target_n:
+                            confidence = 0.99 # Already happened
+                        else:
+                            # User: "If count is 0 then NO"
+                            confidence = 0.05
 
                     analysis_steps.append(f"Earthquake analysis: Global {mag_val}+ count is {current_count}. Target: {target_n if exactly_match else 'More than ' + str(target_n)}. Adjusted confidence: {prev_conf:.2f} -> {confidence:.2f}.")
 
