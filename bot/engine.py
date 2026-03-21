@@ -635,7 +635,7 @@ class WeatherBot:
 
         # Fetch Price
         vwap = await self.get_vwap_price(target_token, "BUY", self.config["trade_amount"])
-        if vwap is None:
+        if vwap is None or vwap <= 0:
             amm_prices = market.get("outcomePrices")
             if isinstance(amm_prices, str):
                 try: amm_prices = json.loads(amm_prices)
@@ -643,8 +643,8 @@ class WeatherBot:
             if amm_prices and len(amm_prices) >= 2:
                 vwap = float(amm_prices[0 if target_side == "YES" else 1])
 
-        if vwap is None:
-            self.add_log(f"No price found for {target_side} token in {market.get('id')}", "DEBUG")
+        if vwap is None or vwap <= 0:
+            self.add_log(f"No valid price (>0) found for {target_side} token in {market.get('id')}. Price: {vwap}", "DEBUG")
             return
 
         edge = target_conf - vwap - taker_fee
@@ -826,6 +826,16 @@ class WeatherBot:
                 location = self.parse_market_location(full_text)
                 date_str = self.parse_market_date(title)
 
+                if not location or not date_str:
+                    log.debug(f"Missing metadata for {m.get('id')} - Loc: {location}, Date: {date_str}")
+                    continue
+
+                # Date Filter: Don't trade on past events
+                current_date = self.get_local_date(location)
+                if len(date_str) == 10 and date_str < current_date:
+                    log.debug(f"Skipping past market: {m.get('id')} ({date_str} < {current_date})")
+                    continue
+
                 # Determine event type
                 etype = "unknown"
                 for t, synonyms in SYNONYMS.items():
@@ -833,13 +843,10 @@ class WeatherBot:
                         etype = t
                         break
 
-                if not location or not date_str:
-                    log.debug(f"Missing metadata for {m.get('id')} - Loc: {location}, Date: {date_str}")
-                    continue
                 city_data = CITY_DB.get(location)
                 confidence = 0.5 # Default neutral
 
-                # A. News Reference Check
+                # A. News Reference Check (Only for non-quantitative markets or as secondary confirmation)
                 matching_alerts = []
                 for a in all_alerts:
                     if a.location == location:
@@ -850,10 +857,13 @@ class WeatherBot:
 
                 if matching_alerts:
                     best_alert = max(matching_alerts, key=lambda a: a.confidence)
-                    confidence = max(confidence, best_alert.confidence)
+                    # User: Do not let news alerts override quantitative forecast logic for Temp/Rain/Quake
+                    if etype not in ["temperature", "rain", "earthquake"]:
+                        confidence = max(confidence, best_alert.confidence)
+
                     triggering_news_objs = [a.__dict__ for a in matching_alerts]
-                    analysis_steps.append(f"Found {len(matching_alerts)} matching news alerts. Best alert from {best_alert.source} with confidence {best_alert.confidence:.2f}.")
-                    self.add_log(f"  [NEWS] Found matching {best_alert.source} alert for {location}. Confidence -> {confidence:.2f}")
+                    analysis_steps.append(f"Found {len(matching_alerts)} matching news alerts from {best_alert.source}.")
+                    # self.add_log(f"  [NEWS] Found matching {best_alert.source} alert for {location}.")
 
                 # B. Temperature and Precipitation Logic (with Local Caching)
                 if etype in ["temperature", "rain"] and city_data:
@@ -880,21 +890,27 @@ class WeatherBot:
                                 # 2. If diff >= 3.0 -> Strong NO (0.05)
                                 # 3. Otherwise -> SKIP (0.5)
 
+                                # User Rule: Diff <= 0.5 (YES), Diff >= 3.0 (NO/YES based on logic), Diff 1-2 (SKIP)
+                                abs_diff = abs(target_val - (thresh.get("value") or 0 if thresh["type"] != "range" else (thresh["min"] if target_val < thresh["min"] else thresh["max"] if target_val > thresh["max"] else target_val)))
+
                                 if thresh["type"] == "exact":
-                                    abs_diff = abs(target_val - thresh["value"])
                                     if abs_diff <= 0.5: confidence = 0.95
                                     elif abs_diff >= 3.0: confidence = 0.05
                                     else: confidence = 0.5
                                 elif thresh["type"] == "at_least":
-                                    diff = target_val - thresh["value"]
-                                    if diff >= 3.0 or abs(diff) <= 0.5: confidence = 0.95
-                                    elif diff <= -3.0: confidence = 0.05
-                                    else: confidence = 0.5
+                                    if target_val >= thresh["value"] + 3.0 or abs(target_val - thresh["value"]) <= 0.5:
+                                        confidence = 0.95
+                                    elif target_val <= thresh["value"] - 3.0:
+                                        confidence = 0.05
+                                    else:
+                                        confidence = 0.5
                                 elif thresh["type"] == "less_than":
-                                    diff = thresh["value"] - target_val
-                                    if diff >= 3.0 or abs(diff) <= 0.5: confidence = 0.95
-                                    elif diff <= -3.0: confidence = 0.05
-                                    else: confidence = 0.5
+                                    if target_val <= thresh["value"] - 3.0 or abs(target_val - thresh["value"]) <= 0.5:
+                                        confidence = 0.95
+                                    elif target_val >= thresh["value"] + 3.0:
+                                        confidence = 0.05
+                                    else:
+                                        confidence = 0.5
                                 elif thresh["type"] == "range":
                                     if thresh["min"] <= target_val <= thresh["max"]:
                                         dist_to_edge = min(abs(target_val - thresh["min"]), abs(target_val - thresh["max"]))
@@ -907,7 +923,7 @@ class WeatherBot:
                                         if dist_to_edge >= 3.0: confidence = 0.05
                                         else: confidence = 0.5
 
-                                analysis_steps.append(f"Temperature forecast for {location}: {target_val:.1f}{thresh['unit']}. Market threshold: {thresh['type']} {thresh.get('value') or thresh.get('min')}. Adjusted confidence to {confidence:.2f}.")
+                                analysis_steps.append(f"Temperature analysis: Forecast {target_val:.1f}{thresh['unit']} vs {thresh['type']} {thresh.get('value') or (str(thresh.get('min')) + '-' + str(thresh.get('max')))}. Confidence: {confidence:.2f}")
                                 self.add_log(f"  [DATA] {location} Temp: {target_val:.1f}{thresh['unit']} vs Market: {thresh['type']} {thresh.get('value') or thresh.get('min')}. Conf -> {confidence:.2f}", "DEBUG")
 
                     elif etype == "rain":
